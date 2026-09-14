@@ -247,7 +247,7 @@ if(ANDROID)
 
     target_link_libraries(audio_core PRIVATE oboe)
     target_compile_definitions(audio_core PUBLIC HAVE_OBOE)
-else()
+elseif (ENABLE_SDL3)
     target_sources(audio_core PRIVATE
         sink/sdl3_sink.cpp
         sink/sdl3_sink.h)

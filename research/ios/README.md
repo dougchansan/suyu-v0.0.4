@@ -1,5 +1,13 @@
 # iHorizon - separate iOS bring-up
 
+Latest bring-up: the actual no-JIT core now builds for iPhoneOS and passes two
+Core::System Initialize/destruction cycles on the physical phone, together with
+100 timing reset cycles and a small software-backed memory check on 16 KiB host
+pages. The optional `SUYU_BUILD_IOS_CORE_PROBE` target uses the companion iHorizon
+checkout via `IHORIZON_APP_SOURCE`; its scripts build the pinned dependencies.
+This is not process startup, service execution, rendering, or game boot.
+The historical prototype description below remains the standalone default.
+
 This is an **additive, content-free research prototype**, not a working Switch
 emulator app or a Mario Kart 8 Deluxe iOS compatibility claim. It does not modify
 Lattice. The application identity is `iHorizon`, with bundle identifier
@@ -120,8 +128,10 @@ and a `SUYU_NO_JIT` build. It does not manufacture a substitute HLE implementati
 1. Verify exact executable/module identity, then install the static callbacks
    **before** process loading / `KProcess::InitializeInterfaces`.
 2. Route each real module load index/base through `SetRecompBaseSetter`.
-3. After load assigns every base, call `FinalizeStaticImages`; refuse launch if
-   it fails. Only then start guest threads.
+3. Bind and seal within the load lifecycle, before publishing the process to
+   the applet manager. The current lazy setter runs too late; merely calling
+   `FinalizeStaticImages` after System::Load returns is unsafe. This binding
+   integration remains unimplemented and is not used by the initialization probe.
 4. Join every guest thread before clearing/replacing the registry.
 
 The registry passes the **absolute** guest PC to the generated lookup, which

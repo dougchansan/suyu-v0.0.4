@@ -53,7 +53,7 @@ if (ANDROID)
         drivers/android.h)
 
     target_link_libraries(input_common PRIVATE android)
-else()
+elseif (ENABLE_SDL3)
     target_sources(input_common PRIVATE
         drivers/joycon.cpp
         drivers/joycon.h

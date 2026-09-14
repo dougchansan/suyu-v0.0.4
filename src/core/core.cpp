@@ -527,7 +527,11 @@ struct System::Impl {
 
 System::System() : impl{std::make_unique<Impl>(*this)} {}
 
-System::~System() = default;
+System::~System() {
+    // Timing callbacks use the kernel, which is destroyed before core_timing
+    // during the default Impl member teardown.
+    impl->core_timing.Reset();
+}
 
 CpuManager& System::GetCpuManager() {
     return impl->cpu_manager;

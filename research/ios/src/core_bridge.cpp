@@ -25,7 +25,9 @@ bool InstallStaticImages() {
     });
     return true;
 }
-// After System::Load has assigned every module base, BEFORE any guest runs.
+// Requires explicit loader-time binding BEFORE process publication/guest startup.
+// The current lazy ArmRecomp base setter is not sufficient; this bridge is not
+// connected by the core initialization probe.
 // A false result is a launch failure, never permission to start another engine.
 bool FinalizeStaticImages() { return active && active->Seal(); }
 const char* StaticImageError() {

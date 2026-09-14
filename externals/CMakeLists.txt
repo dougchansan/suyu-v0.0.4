@@ -139,7 +139,7 @@ if(ENABLE_CUBEB)
     endif()
 endif()
 
-if (NOT ANDROID)
+if (ENABLE_SDL3)
     if (NOT YUZU_USE_BUNDLED_SDL3)
         if (NOT WIN32)
             # Yuzu itself needs: Atomic Audio Events Joystick Haptic Sensor Threads Timers
@@ -398,7 +398,7 @@ if (ANDROID)
     add_library(oboe::oboe ALIAS oboe)
 endif()
 
-if (APPLE)
+if (APPLE AND NOT IOS)
     add_subdirectory(metal-cpp)
 
     # moltenvk
