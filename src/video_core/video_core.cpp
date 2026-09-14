@@ -58,9 +58,18 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     try {
         auto renderer = CreateRenderer(system, emu_window, *gpu, std::move(context));
         gpu->BindRenderer(std::move(renderer));
-    } catch (const std::runtime_error& exception) {
+    } catch (const std::exception& exception) {
         scope.Cancel();
         LOG_ERROR(HW_GPU, "Failed to initialize GPU: {}", exception.what());
+        gpu.reset();
+    } catch (...) {
+        // CreateRenderer owns the context once it is called, and the unwind that got us here has
+        // already destroyed it, so the guard must be cancelled before it can reach DoneCurrent()
+        // through the dead reference. Types that are not std::exception - a vk::Exception escaping
+        // a renderer's member initialisers, for one - used to skip the handler above entirely and
+        // leave the guard active.
+        scope.Cancel();
+        LOG_ERROR(HW_GPU, "Failed to initialize GPU: unknown exception");
         gpu.reset();
     }
 }
