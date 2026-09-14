@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#if __has_include(<cxxabi.h>)
+#include <cxxabi.h>
+#endif
 #include <memory>
 
 #include "common/logging.h"
@@ -66,10 +69,16 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
         // CreateRenderer owns the context once it is called, and the unwind that got us here has
         // already destroyed it, so the guard must be cancelled before it can reach DoneCurrent()
         // through the dead reference. Types that are not std::exception - a vk::Exception escaping
-        // a renderer's member initialisers, for one - used to skip the handler above entirely and
-        // leave the guard active.
+        // a renderer's member initialisers, or an Objective-C exception out of MoltenVK, for
+        // instance - used to skip the handler above entirely and leave the guard active.
         scope.Cancel();
-        LOG_ERROR(HW_GPU, "Failed to initialize GPU: unknown exception");
+#if __has_include(<cxxabi.h>)
+        const std::type_info* const type = abi::__cxa_current_exception_type();
+        LOG_ERROR(HW_GPU, "Failed to initialize GPU: unhandled exception of type {}",
+                  type ? type->name() : "unknown");
+#else
+        LOG_ERROR(HW_GPU, "Failed to initialize GPU: unhandled exception of unknown type");
+#endif
         gpu.reset();
     }
 }
