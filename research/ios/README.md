@@ -1,10 +1,9 @@
-# Switch AOT Research — separate iOS bring-up
+# iHorizon - separate iOS bring-up
 
 This is an **additive, content-free research prototype**, not a working Switch
 emulator app or a Mario Kart 8 Deluxe iOS compatibility claim. It does not modify
-Lattice. The current bundle identifier is the neutral provisional
-`org.switchaot.research` and should be replaced once the final app name/namespace
-is chosen.
+Lattice. The application identity is `iHorizon`, with bundle identifier
+`org.ihorizon.app`.
 
 ## Checkpoint
 

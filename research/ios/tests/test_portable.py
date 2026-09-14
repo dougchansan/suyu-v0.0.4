@@ -88,7 +88,7 @@ class PortableTests(unittest.TestCase):
         with (HERE/'apple/Research.entitlements').open('rb') as f:
             self.assertEqual(plistlib.load(f), {})
         with (HERE/'apple/Info.plist.in').open('rb') as f:
-            self.assertEqual(plistlib.load(f)['CFBundleName'], 'Switch AOT Research')
+            self.assertEqual(plistlib.load(f)['CFBundleName'], 'iHorizon')
 
 if __name__ == '__main__':
     print('Local evidence directory:', BASE, flush=True)

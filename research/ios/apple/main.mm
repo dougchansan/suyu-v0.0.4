@@ -16,7 +16,7 @@
     text.backgroundColor = UIColor.systemBackgroundColor;
     (void)switch_aot_self_test();
     text.text = [NSString stringWithFormat:
-        @"Switch AOT Research\n\n%s\n\n"
+        @"iHorizon\n\n%s\n\n"
          "This is a separate private-development diagnostic app, not Lattice.\n\n"
          "This milestone does not boot a game. Suyu's HLE, graphics, audio, "
          "input and owner-content loading still need iOS integration.\n\n"

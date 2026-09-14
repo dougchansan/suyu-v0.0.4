@@ -3,8 +3,8 @@
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
 <key>CFBundleIdentifier</key><string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
-<key>CFBundleName</key><string>Switch AOT Research</string>
-<key>CFBundleDisplayName</key><string>Switch AOT Research</string>
+<key>CFBundleName</key><string>iHorizon</string>
+<key>CFBundleDisplayName</key><string>iHorizon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>

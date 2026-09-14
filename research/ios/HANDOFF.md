@@ -69,7 +69,7 @@ Build the diagnostic app for iPhoneOS, not macOS ARM64 or simulator ARM64:
 bash research/ios/scripts/build-ios.sh iphoneos
 ```
 
-Use the generated `SwitchAOTResearch.xcodeproj` to select a local team and the
+Use the generated `iHorizon.xcodeproj` to select a local team and the
 paired iPhone 16, then build/install. The bundle identity must remain separate
 from Lattice. Record whether the app starts and displays the synthetic PASS.
 Run a device build without a debugger attached as well as a development run.

@@ -1,5 +1,17 @@
 # Initial Linux validation report
 
+## iHorizon takeover validation
+
+The original eight portable tests and the actual emitter integration were rerun
+successfully in WSL Ubuntu using GCC 15.2.0, CMake 4.2.3 and Linux Python 3.14.4.
+The actual `arm64_to_c.h` emitted all three original ADD/SVC modules; compilation,
+static link and CTest passed before and after the Apple identity rename.
+Generated-runtime compiler warnings remain for unchecked fread results and a
+potentially truncated save-directory buffer; these paths were not exercised by
+the two-instruction probe. Apple compilation/signing/device tests remain unrun
+because the networked MacBook was offline. The older report below is retained
+as historical evidence, not the latest emitter status.
+
 Checkpoint: September 13, 2026 (Pacific/Honolulu).
 Base: `4f1b898a5eec6eff1d449049c8102d52ac356dd8`.
 Environment: x86-64 Linux; CMake 3.31.6; Ninja; GCC Release and Clang Debug

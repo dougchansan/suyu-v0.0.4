@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 cmake_minimum_required(VERSION 3.24)
-project(SwitchAOTResearch LANGUAGES C CXX)
+project(iHorizon LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -40,12 +40,12 @@ if(is_synthetic)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     enable_language(OBJCXX)
-    # Neutral provisional ID. Override locally once the app name/namespace is final.
-    set(SWITCH_AOT_BUNDLE_ID "org.switchaot.research" CACHE STRING "Separate research app identity")
-    add_executable(SwitchAOTResearch MACOSX_BUNDLE apple/main.mm)
-    target_compile_options(SwitchAOTResearch PRIVATE -fobjc-arc)
-    target_link_libraries(SwitchAOTResearch PRIVATE switch_aot_host "-framework UIKit")
-    set_target_properties(SwitchAOTResearch PROPERTIES
+    # iHorizon has a stable identity, separate from other applications.
+    set(SWITCH_AOT_BUNDLE_ID "org.ihorizon.app" CACHE STRING "iHorizon app identity")
+    add_executable(iHorizon MACOSX_BUNDLE apple/main.mm)
+    target_compile_options(iHorizon PRIVATE -fobjc-arc)
+    target_link_libraries(iHorizon PRIVATE switch_aot_host "-framework UIKit")
+    set_target_properties(iHorizon PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/apple/Info.plist.in"
         MACOSX_BUNDLE_GUI_IDENTIFIER "${SWITCH_AOT_BUNDLE_ID}"
         XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${SWITCH_AOT_BUNDLE_ID}"
