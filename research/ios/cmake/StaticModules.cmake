@@ -20,6 +20,8 @@ function(switch_aot_add_images target exefs)
     endif()
     add_library(${target} STATIC "${exefs}/recomp_registration.c")
     set(first_hash "")
+    set(guard_declarations "")
+    set(guard_calls "")
     foreach(module IN LISTS modules)
         if(NOT module MATCHES "^(rtld|main|sdk|subsdk[0-9]+)$")
             message(FATAL_ERROR "Unexpected module directory name")
@@ -47,9 +49,15 @@ function(switch_aot_add_images target exefs)
             target_compile_definitions(recomp_static_${module} PRIVATE
                 recomp_build_index=recomp_build_index_${module}
                 _recomp_index_view=_recomp_index_view_${module}
-                recomp_image_index=recomp_image_index_${module})
+                recomp_image_index=recomp_image_index_${module}
+                recomp_image_guard_v2=recomp_image_guard_v2_${module}
+                g_recomp_guard_host_v2=g_recomp_guard_host_v2_${module})
         endif()
         target_link_libraries(${target} PUBLIC recomp_static_${module})
+        string(APPEND guard_declarations
+            "extern unsigned recomp_image_guard_v2_${module}(unsigned);\n")
+        string(APPEND guard_calls
+            "  if(recomp_image_guard_v2_${module}(2) != 2) return 0;\n")
         # Compile the ACTUAL generated header, not a locally invented prefix.
         set(probe "${CMAKE_CURRENT_BINARY_DIR}/abi_${module}.c")
         file(WRITE "${probe}" "#include <stddef.h>\n#include \"recomp_runtime.h\"\n_Static_assert(sizeof(void*)==8, \"64-bit host required\");\n_Static_assert(offsetof(GuestContext, pc)==256, \"pc ABI\");\n_Static_assert(offsetof(GuestContext, pending_svc)==304, \"svc ABI\");\n_Static_assert(offsetof(GuestContext, vreg)==312, \"SIMD ABI\");\n_Static_assert(offsetof(GuestContext, tpidr_el0)==824, \"TLS ABI\");\n_Static_assert(offsetof(GuestContext, host_mem)==832, \"memory ABI\");\n_Static_assert(offsetof(GuestContext, tpidrro_el0)==840, \"read-only TLS ABI\");\n_Static_assert(offsetof(GuestContext, fpcr)==848, \"FPCR ABI\");\n_Static_assert(offsetof(GuestContext, fpsr)==856, \"FPSR ABI\");\n_Static_assert(offsetof(GuestContext, chain_budget)==864, \"chain budget ABI\");\n_Static_assert(sizeof(RecompHostMem)==112, \"host memory ABI\");\n_Static_assert(offsetof(RecompHostMem, excl_store_pair)==64, \"exclusive ABI\");\n_Static_assert(offsetof(RecompHostMem, page_entries)==72, \"page table ABI\");\n")
@@ -57,6 +65,10 @@ function(switch_aot_add_images target exefs)
         target_include_directories(switch_aot_abi_${module} PRIVATE "${exefs}/${module}")
         target_sources(${target} PRIVATE $<TARGET_OBJECTS:switch_aot_abi_${module}>)
     endforeach()
+    set(guard_source "${CMAKE_CURRENT_BINARY_DIR}/static_guards.c")
+    file(WRITE "${guard_source}"
+        "${guard_declarations}int switch_aot_enable_guards(void){\n${guard_calls}  return 1;\n}\n")
+    target_sources(${target} PRIVATE "${guard_source}")
     if(UNIX AND NOT APPLE)
         target_link_libraries(${target} PUBLIC m)
     endif()

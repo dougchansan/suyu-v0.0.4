@@ -28,6 +28,12 @@ Registry::Registry(const SuyuRecompStaticModule* modules, unsigned count) {
         entries_.push_back({m, 0, false});
     }
 }
+bool Registry::BindNamed(std::size_t index, const char* name, std::uint64_t base) {
+    if (index >= entries_.size()) return Fail("Unexpected runtime module index");
+    if (!name || std::strcmp(name, entries_[index].module.name) != 0)
+        return Fail("Runtime module name disagrees with registration load order");
+    return Bind(index, base);
+}
 bool Registry::Bind(std::size_t index, std::uint64_t base) {
     if (!error_.empty()) return false;
     if (sealed_) return Fail("Cannot rebind a sealed registry");
@@ -58,7 +64,9 @@ SwitchAOTBlock Registry::Lookup(std::uint64_t pc) const noexcept {
     // Match by load index, never by NSO's embedded display name. The image
     // lookup receives an ABSOLUTE guest PC and subtracts its own base once.
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
-        if (pc >= it->base) return it->module.lookup(pc);
+        if (pc >= it->base) {
+            return it->module.lookup(pc);
+        }
     }
     return nullptr;
 }

@@ -398,7 +398,14 @@ if (ANDROID)
     add_library(oboe::oboe ALIAS oboe)
 endif()
 
-if (APPLE AND NOT IOS)
+if (IOS)
+    # Device-only static MoltenVK, built by iHorizon/scripts/build-moltenvk-ios.sh.
+    # Never fall back to the bundled macOS dylib for an iOS target.
+    set(MOLTENVK_LIBRARY "" CACHE FILEPATH "Path to the iOS arm64 static MoltenVK library")
+    if (NOT EXISTS "${MOLTENVK_LIBRARY}" OR NOT MOLTENVK_LIBRARY MATCHES "\\.a$")
+        message(FATAL_ERROR "iOS Vulkan requires MOLTENVK_LIBRARY pointing to an iOS static .a")
+    endif()
+elseif (APPLE AND NOT IOS)
     add_subdirectory(metal-cpp)
 
     # moltenvk

@@ -100,7 +100,8 @@ std::unique_ptr<Process> CreateApplicationProcess(std::vector<u8>& out_control, 
         launch.title_id = process->GetProgramId();
 
         FileSys::PatchManager pm{launch.title_id, system.GetFileSystemController(), storage};
-        launch.version = pm.GetGameVersion().value_or(0);
+        launch.version = pm.GetGameVersion().value_or(
+            system.GetApplicationVersionOverride().value_or(0));
 
         // TODO(DarkLordZach): When FSController/Game Card Support is added, if
         // current_process_game_card use correct StorageId

@@ -257,3 +257,11 @@ elseif (ENABLE_SDL3)
 endif()
 
 create_target_directory_groups(audio_core)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_compile_options(audio_core PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fno-rtti>)
+    target_sources(audio_core PRIVATE sink/apple_sink.mm sink/apple_sink.h)
+    set_source_files_properties(sink/apple_sink.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_compile_definitions(audio_core PRIVATE HAVE_APPLE_AUDIO=1)
+    target_link_libraries(audio_core PRIVATE "-framework AudioToolbox" "-framework AVFoundation")
+endif()

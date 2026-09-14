@@ -28,6 +28,12 @@ void PhysicalCore::RunThread(KernelCore& kernel, Kernel::KThread* thread) {
     auto* process = thread->GetOwnerProcess();
     auto& system = kernel.System();
     auto* interface = process->GetArmInterface(m_core_index);
+    if (!interface) {
+        LOG_CRITICAL(Kernel,
+                     "Cannot run thread {} for process '{}' on core {} without a CPU interface",
+                     thread->GetThreadId(), process->GetName(), m_core_index);
+        return;
+    }
 
     {
         static bool announced = false;

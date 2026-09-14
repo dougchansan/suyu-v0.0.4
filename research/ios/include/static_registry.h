@@ -24,6 +24,7 @@ class Registry {
 public:
     Registry(const SuyuRecompStaticModule* modules, unsigned count);
     bool Bind(std::size_t index, std::uint64_t base);
+    bool BindNamed(std::size_t index, const char* name, std::uint64_t base);
     bool Seal();
     SwitchAOTBlock Lookup(std::uint64_t pc) const noexcept;
     bool Ready() const noexcept { return sealed_ && error_.empty(); }

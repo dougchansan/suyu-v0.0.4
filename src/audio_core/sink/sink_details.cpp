@@ -10,6 +10,9 @@
 #include <vector>
 
 #include "audio_core/sink/sink_details.h"
+#ifdef HAVE_APPLE_AUDIO
+#include "audio_core/sink/apple_sink.h"
+#endif
 #ifdef HAVE_OBOE
 #include "audio_core/sink/oboe_sink.h"
 #endif
@@ -170,6 +173,12 @@ std::vector<std::string> GetDeviceListForSink(Settings::AudioEngine sink_id, boo
 }
 
 std::unique_ptr<Sink> CreateSinkFromID(Settings::AudioEngine sink_id, std::string_view device_id) {
+#ifdef HAVE_APPLE_AUDIO
+    if (sink_id == Settings::AudioEngine::Auto) {
+        LOG_INFO(Audio_Sink, "Selecting iOS AudioQueue output backend");
+        return CreateAppleSink();
+    }
+#endif
     return GetOutputSinkDetails(sink_id).factory(device_id);
 }
 

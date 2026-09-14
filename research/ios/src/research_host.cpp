@@ -53,6 +53,20 @@ extern "C" int switch_aot_self_test() {
         Check(!registry.Lookup(UINT64_MAX), "Invalid high PC");
         Check(!registry.Bind(0, 0x400000), "Rebind must fail");
         Check(!registry.Lookup(0x100100), "Failed registry must fail closed");
+        SwitchAOT::Registry wrong_name(modules, count);
+        Check(!wrong_name.BindNamed(0, "main", 0x100000), "Wrong runtime name must fail");
+        Check(!wrong_name.Seal(), "Name failure must remain fatal");
+        SwitchAOT::Registry wrong_order(modules, count);
+        Check(!wrong_order.BindNamed(0, modules[1].name, 0x100000), "Wrong name order");
+        for (unsigned session = 0; session < 2; ++session) {
+            SwitchAOT::Registry fresh(modules, count);
+            const auto offset = 0x1000000ULL * (session + 1);
+            for (unsigned i = 0; i < count; ++i)
+                Check(fresh.BindNamed(i, modules[i].name, offset + 0x100000ULL * i),
+                      "Fresh session binds all named modules");
+            Check(fresh.Seal(), "Fresh session seal");
+            Check(fresh.Lookup(offset + 0x100), "Fresh session lookup uses new base");
+        }
         SwitchAOT::Registry empty(nullptr, 0);
         Check(!empty.Seal(), "Empty module set");
         SwitchAOT::Registry missing(modules, count);

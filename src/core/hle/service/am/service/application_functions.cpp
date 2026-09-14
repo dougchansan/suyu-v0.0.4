@@ -219,7 +219,11 @@ Result IApplicationFunctions::GetDisplayVersion(Out<DisplayVersion> out_display_
         return pm_update.GetControlMetadata();
     }();
 
-    if (res.first != nullptr) {
+    const auto& version_override = system.GetApplicationDisplayVersionOverride();
+    if (!version_override.empty()) {
+        std::memcpy(out_display_version->string.data(), version_override.data(),
+                    (std::min)(version_override.size(), out_display_version->string.size()));
+    } else if (res.first != nullptr) {
         const auto& version = res.first->GetVersionString();
         std::memcpy(out_display_version->string.data(), version.data(),
                     (std::min)(version.size(), out_display_version->string.size()));

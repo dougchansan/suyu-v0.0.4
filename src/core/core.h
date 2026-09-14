@@ -349,6 +349,9 @@ public:
     [[nodiscard]] Service::AM::AppletManager& GetAppletManager();
 
     void SetContentProvider(std::unique_ptr<FileSys::ContentProviderUnion> provider);
+    void SetApplicationVersionOverride(u32 version, std::string display_version);
+    [[nodiscard]] std::optional<u32> GetApplicationVersionOverride() const;
+    [[nodiscard]] const std::string& GetApplicationDisplayVersionOverride() const;
 
     [[nodiscard]] FileSys::ContentProvider& GetContentProvider();
     [[nodiscard]] const FileSys::ContentProvider& GetContentProvider() const;

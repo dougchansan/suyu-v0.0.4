@@ -588,7 +588,7 @@ public:
             prot_flags |= PROT_READ;
         if (True(perms & MemoryPermission::Write))
             prot_flags |= PROT_WRITE;
-#ifdef ARCHITECTURE_arm64
+#if defined(ARCHITECTURE_arm64) && !defined(SUYU_NO_JIT)
         if (True(perms & MemoryPermission::Execute))
             prot_flags |= PROT_EXEC;
 #endif
@@ -623,7 +623,7 @@ public:
         if (write) {
             flags |= PROT_WRITE;
         }
-#ifdef HAS_NCE
+#if defined(HAS_NCE) && !defined(SUYU_NO_JIT)
         if (execute) {
             flags |= PROT_EXEC;
         }

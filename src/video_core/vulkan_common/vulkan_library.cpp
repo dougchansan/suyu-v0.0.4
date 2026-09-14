@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <string>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
 
 #include "common/dynamic_library.h"
 #include "common/fs/path_util.h"
@@ -16,7 +19,11 @@ namespace Vulkan {
 std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
     [[maybe_unused]] Core::Frontend::GraphicsContext* context) {
     LOG_DEBUG(Render_Vulkan, "Looking for a Vulkan library");
-#if defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // iOS links MoltenVK into the signed executable. CreateInstance binds its
+    // entry point directly; there is no runtime-loaded driver library.
+    return std::make_shared<Common::DynamicLibrary>();
+#elif defined(__ANDROID__) && defined(ARCHITECTURE_arm64)
     // Android manages its Vulkan driver from the frontend.
     return context->GetDriverLibrary();
 #else

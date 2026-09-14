@@ -4855,22 +4855,33 @@ static unsigned char* recomp_host_ptr(GuestContext* c, uint64_t va){
   return p ? (unsigned char*)(p + (uintptr_t)va) : 0;
 }
 
+/* Direct scalar access must remain inside one guest page and the address space.
+   Crossing accesses use the host callback, which resolves each guest page. */
+static int recomp_scalar_same_page(const RecompHostMem* hm, uint64_t a, uint64_t bytes){
+  uint64_t psz;
+  if(!hm || !hm->page_entries || hm->page_bits >= 64) return 0;
+  a &= 0xffffffffffffULL;
+  if(a >= hm->address_space_max || bytes > hm->address_space_max - a) return 0;
+  psz = (uint64_t)1 << hm->page_bits;
+  return bytes <= psz - (a & (psz - 1));
+}
+
 uint64_t recomp_load8 (GuestContext* c,uint64_t a){
   unsigned char* p=recomp_host_ptr(c,a); if(p) return (uint64_t)*p; return memload(c,a,1);}
 uint64_t recomp_load16(GuestContext* c,uint64_t a){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){uint16_t v;memcpy(&v,p,2);return (uint64_t)v;} return memload(c,a,2);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,2)?recomp_host_ptr(c,a):0; if(p){uint16_t v;memcpy(&v,p,2);return (uint64_t)v;} return memload(c,a,2);}
 uint64_t recomp_load32(GuestContext* c,uint64_t a){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){uint32_t v;memcpy(&v,p,4);return (uint64_t)v;} return memload(c,a,4);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,4)?recomp_host_ptr(c,a):0; if(p){uint32_t v;memcpy(&v,p,4);return (uint64_t)v;} return memload(c,a,4);}
 uint64_t recomp_load64(GuestContext* c,uint64_t a){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){uint64_t v;memcpy(&v,p,8);return v;} return memload(c,a,8);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,8)?recomp_host_ptr(c,a):0; if(p){uint64_t v;memcpy(&v,p,8);return v;} return memload(c,a,8);}
 void recomp_store8 (GuestContext* c,uint64_t a,uint64_t v){
   unsigned char* p=recomp_host_ptr(c,a); if(p){*p=(unsigned char)v;return;} memstore(c,a,1,v);}
 void recomp_store16(GuestContext* c,uint64_t a,uint64_t v){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){uint16_t t=(uint16_t)v;memcpy(p,&t,2);return;} memstore(c,a,2,v);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,2)?recomp_host_ptr(c,a):0; if(p){uint16_t t=(uint16_t)v;memcpy(p,&t,2);return;} memstore(c,a,2,v);}
 void recomp_store32(GuestContext* c,uint64_t a,uint64_t v){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){uint32_t t=(uint32_t)v;memcpy(p,&t,4);return;} memstore(c,a,4,v);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,4)?recomp_host_ptr(c,a):0; if(p){uint32_t t=(uint32_t)v;memcpy(p,&t,4);return;} memstore(c,a,4,v);}
 void recomp_store64(GuestContext* c,uint64_t a,uint64_t v){
-  unsigned char* p=recomp_host_ptr(c,a); if(p){memcpy(p,&v,8);return;} memstore(c,a,8,v);}
+  unsigned char* p=recomp_scalar_same_page(c->host_mem,a,8)?recomp_host_ptr(c,a):0; if(p){memcpy(p,&v,8);return;} memstore(c,a,8,v);}
 
 /* Pair access. LDP and STP open and close every non-leaf function, which makes
    them the most frequent guest memory operations there are, and as two separate

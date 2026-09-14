@@ -15,6 +15,7 @@
 #include "common/string_util.h"
 #include "core/arm/exclusive_monitor.h"
 #include "core/core.h"
+#include "core/arm/recomp/arm_recomp.h"
 
 #include "launch_timestamp_cache.h"
 #include "core/core_timing.h"
@@ -343,6 +344,18 @@ struct System::Impl {
         kernel.MakeApplicationProcess(process->GetHandle());
         LOG_INFO(Core, "Load: kernel.MakeApplicationProcess returned");
 
+        // Loader inventory is complete here; publication below may immediately
+        // make guest threads runnable on the window-system thread.
+        if (HasRecompPrepareCallback()) {
+            RecompModules modules;
+            if (app_loader->ReadNSOModules(modules) != Loader::ResultStatus::Success ||
+                !PrepareRecompProcess(*process->GetHandle(), modules)) {
+                LOG_CRITICAL(Core, "Static-image preparation failed before process publication");
+                ShutdownMainProcess();
+                return SystemResultStatus::ErrorLoader;
+            }
+        }
+
         // Set up the rest of the system.
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
         if (init_result != SystemResultStatus::Success) {
@@ -502,6 +515,8 @@ struct System::Impl {
     std::shared_ptr<Service::SM::ServiceManager> service_manager;
     /// ContentProviderUnion instance
     std::unique_ptr<FileSys::ContentProviderUnion> content_provider;
+    std::optional<u32> application_version_override;
+    std::string application_display_version_override;
     /// AppLoader used to load the current executing application
     std::unique_ptr<Loader::AppLoader> app_loader;
     std::stop_source stop_event;
@@ -789,6 +804,19 @@ Service::AM::AppletManager& System::GetAppletManager() {
 
 void System::SetContentProvider(std::unique_ptr<FileSys::ContentProviderUnion> provider) {
     impl->content_provider = std::move(provider);
+}
+
+void System::SetApplicationVersionOverride(u32 version, std::string display_version) {
+    impl->application_version_override = version;
+    impl->application_display_version_override = std::move(display_version);
+}
+
+std::optional<u32> System::GetApplicationVersionOverride() const {
+    return impl->application_version_override;
+}
+
+const std::string& System::GetApplicationDisplayVersionOverride() const {
+    return impl->application_display_version_override;
 }
 
 FileSys::ContentProvider& System::GetContentProvider() {

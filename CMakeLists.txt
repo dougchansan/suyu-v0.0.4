@@ -368,6 +368,11 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(IOS)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 
 # Output binaries to bin/
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/bin)
@@ -525,7 +530,7 @@ endfunction()
 
 if (APPLE)
     if(IOS)
-        set(apple_frameworks Foundation CoreFoundation CFNetwork UIKit Metal QuartzCore CoreVideo CoreMedia Security UniformTypeIdentifiers)
+        set(apple_frameworks Foundation CoreFoundation CFNetwork UIKit Metal QuartzCore IOSurface CoreGraphics CoreVideo CoreMedia Security UniformTypeIdentifiers GameController)
     else()
         set(apple_frameworks Carbon Metal Cocoa IOKit CoreVideo CoreMedia Security UniformTypeIdentifiers)
     endif()
@@ -725,6 +730,9 @@ if (MSVC AND CXX_CLANG)
 endif()
 
 add_subdirectory(src)
+if(SUYU_NO_JIT)
+    target_compile_definitions(common PRIVATE SUYU_NO_JIT=1)
+endif()
 
 option(SUYU_BUILD_IOS_CORE_PROBE "Build iHorizon with the real iOS core initialization probe" OFF)
 if(SUYU_BUILD_IOS_CORE_PROBE)
@@ -741,7 +749,31 @@ if(SUYU_BUILD_IOS_CORE_PROBE)
         "${CMAKE_CURRENT_SOURCE_DIR}/research/ios/src/core_probe.cpp")
     target_include_directories(iHorizon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(iHorizon PRIVATE IHORIZON_WITH_CORE=1)
+    target_compile_options(iHorizon PRIVATE -fno-rtti)
     target_link_libraries(iHorizon PRIVATE core input_common frontend_common objc ${PLATFORM_LIBRARIES})
+    target_link_libraries(iHorizon PRIVATE "${MOLTENVK_LIBRARY}")
+    # Xcode's simulator SDK does not ship libc++experimental. Keep the global
+    # compile feature flag, but select the ordinary libc++ archive at this final
+    # app link. The physical-device SDK continues to use its existing path.
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        target_link_options(iHorizon PRIVATE -nostdlib++ -lc++)
+    endif()
+    option(IHORIZON_GAMEPLAY "Build the controlled iOS gameplay frontend" OFF)
+    if(IHORIZON_GAMEPLAY)
+        set(IHORIZON_GAME_IDENTITY_FILE "" CACHE FILEPATH "Private signed content identity manifest")
+        if(NOT EXISTS "${IHORIZON_GAME_IDENTITY_FILE}")
+            message(FATAL_ERROR "Gameplay requires the exact private content identity manifest")
+        endif()
+        target_sources(iHorizon PRIVATE "${IHORIZON_APP_SOURCE}/apple/game_session.mm"
+            "${IHORIZON_APP_SOURCE}/apple/vulkan_probe.mm"
+            "${IHORIZON_APP_SOURCE}/apple/platform_input.mm"
+            "${CMAKE_CURRENT_SOURCE_DIR}/research/ios/src/core_bridge.cpp"
+            "${IHORIZON_GAME_IDENTITY_FILE}")
+        set_source_files_properties("${IHORIZON_GAME_IDENTITY_FILE}" TARGET_DIRECTORY iHorizon
+            PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+        target_compile_definitions(iHorizon PRIVATE IHORIZON_GAMEPLAY=1)
+        target_link_libraries(iHorizon PRIVATE Vulkan::Headers)
+    endif()
     set_target_properties(iHorizon PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${IHORIZON_APP_SOURCE}/apple/Info.plist.in")
 endif()
