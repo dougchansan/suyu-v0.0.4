@@ -1,0 +1,10 @@
+/build*/
+/private/
+__pycache__/
+*.pyc
+*.xcuserstate
+*.ipa
+*.mobileprovision
+*.p12
+*.p8
+.DS_Store
