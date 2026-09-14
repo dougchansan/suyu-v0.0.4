@@ -23,4 +23,9 @@ public:
     ~EmuWindow_SDL2_VK() override;
 
     std::unique_ptr<Core::Frontend::GraphicsContext> CreateSharedContext() const override;
+
+#if defined(__APPLE__)
+    /// Owns the CAMetalLayer in render_surface. SDL_MetalView is a void*.
+    void* metal_view{};
+#endif
 };

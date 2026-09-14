@@ -36,7 +36,14 @@ EmuWindow_SDL2_MTL::EmuWindow_SDL2_MTL(InputCommon::InputSubsystem* input_subsys
     }
 
     window_info.type = Core::Frontend::WindowSystemType::Cocoa;
-    window_info.render_surface = SDL_Metal_CreateView(render_window);
+    // The Metal renderer and VK_EXT_metal_surface both take a CAMetalLayer. The view
+    // SDL_Metal_CreateView returns is an NSView and is not accepted as one.
+    metal_view = SDL_Metal_CreateView(render_window);
+    window_info.render_surface = metal_view ? SDL_Metal_GetLayer(metal_view) : nullptr;
+    if (window_info.render_surface == nullptr) {
+        LOG_CRITICAL(Frontend, "Failed to get the CAMetalLayer for the window: {}", SDL_GetError());
+        std::exit(EXIT_FAILURE);
+    }
 
     OnResize();
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
@@ -45,7 +52,12 @@ EmuWindow_SDL2_MTL::EmuWindow_SDL2_MTL(InputCommon::InputSubsystem* input_subsys
              Common::g_scm_branch, Common::g_scm_desc);
 }
 
-EmuWindow_SDL2_MTL::~EmuWindow_SDL2_MTL() = default;
+EmuWindow_SDL2_MTL::~EmuWindow_SDL2_MTL() {
+    if (metal_view) {
+        SDL_Metal_DestroyView(metal_view);
+        metal_view = nullptr;
+    }
+}
 
 std::unique_ptr<Core::Frontend::GraphicsContext> EmuWindow_SDL2_MTL::CreateSharedContext() const {
     return std::make_unique<DummyContext>();
