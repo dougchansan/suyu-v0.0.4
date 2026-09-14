@@ -27,7 +27,6 @@
 #include <sys/random.h>
 #elif defined(__APPLE__)
 #include <sys/types.h>
-#include <sys/random.h>
 #include <mach/vm_map.h>
 #include <mach/mach.h>
 #elif defined(__FreeBSD__)
@@ -508,7 +507,12 @@ public:
 
     bool Init() {
         long page_size = sysconf(_SC_PAGESIZE);
-        ASSERT_MSG(page_size == 0x1000, "page size {:#x} is incompatible with 4K paging", page_size);
+        if (page_size != 0x1000) {
+            LOG_WARNING(HW_Memory,
+                        "Host page size {} cannot support 4K fastmem mappings; using software page-table backing",
+                        page_size);
+            return false;
+        }
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
         fd = shm_open_anon(O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);

@@ -199,7 +199,8 @@ if(MSVC)
 endif()
 
 # TODO(crueter): Cleanup, each dep that has a bundled option should allow to choose between bundled, external, system
-cmake_dependent_option(YUZU_USE_BUNDLED_SDL3 "Download bundled SDL3 build" "${MSVC}" "NOT ANDROID" OFF)
+cmake_dependent_option(ENABLE_SDL3 "Enable SDL3 audio and input backends" ON "NOT ANDROID AND NOT IOS" OFF)
+cmake_dependent_option(YUZU_USE_BUNDLED_SDL3 "Download bundled SDL3 build" "${MSVC}" "ENABLE_SDL3" OFF)
 
 option(ENABLE_CUBEB "Enables the cubeb audio backend" ON)
 
@@ -232,7 +233,10 @@ option(ENABLE_WEB_SERVICE "Enable web services (telemetry, etc.)" ON)
 # covers is a hard failure rather than a fallback - which is the point.
 # Titles without a complete static image, and AArch32 titles, cannot run in
 # such a build. The guest-facing jit:u service goes with it.
-option(SUYU_NO_JIT "Build without dynarmic: statically recompiled code only" OFF)
+option(SUYU_NO_JIT "Build without dynarmic: statically recompiled code only" "${IOS}")
+if(IOS AND NOT SUYU_NO_JIT)
+    message(FATAL_ERROR "iOS requires SUYU_NO_JIT=ON")
+endif()
 option(SUYU_BUILD_LIBRETRO_CORE "Build suyu as a libretro core (suyu_libretro.dll)" OFF)
 if (SUYU_BUILD_LIBRETRO_CORE)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -257,13 +261,16 @@ cmake_dependent_option(YUZU_ROOM "Enable dedicated room functionality" ON "NOT A
 cmake_dependent_option(YUZU_ROOM_STANDALONE "Enable standalone room executable" ON "YUZU_ROOM" OFF)
 
 cmake_dependent_option(YUZU_CMD "Compile the suyu-cli executable" ON "NOT ANDROID" OFF)
+if(NOT ENABLE_SDL3 AND (ENABLE_QT OR YUZU_CMD))
+    message(FATAL_ERROR "SDL3-disabled core builds require ENABLE_QT=OFF and YUZU_CMD=OFF")
+endif()
 
 cmake_dependent_option(YUZU_CRASH_DUMPS "Compile crash dump (Minidump) support" OFF "WIN32 OR PLATFORM_LINUX" OFF)
 
 option(YUZU_DOWNLOAD_TIME_ZONE_DATA "Always download time zone binaries" ON)
 set(YUZU_TZDB_PATH "" CACHE STRING "Path to a pre-downloaded timezone database")
 
-cmake_dependent_option(YUZU_USE_BUNDLED_MOLTENVK "Download bundled MoltenVK lib" ON "APPLE" OFF)
+cmake_dependent_option(YUZU_USE_BUNDLED_MOLTENVK "Download bundled MoltenVK lib" ON "APPLE AND NOT IOS" OFF)
 
 option(YUZU_DISABLE_LLVM "Disable LLVM (useful for CI)" OFF)
 
@@ -399,7 +406,10 @@ set(BUILD_TESTING OFF)
 set(ENABLE_TESTING OFF)
 
 # boost
-set(BOOST_INCLUDE_LIBRARIES algorithm icl pool container heap asio headers process filesystem crc variant)
+set(BOOST_INCLUDE_LIBRARIES algorithm icl pool container heap asio headers process filesystem context crc variant)
+if(IOS)
+    list(REMOVE_ITEM BOOST_INCLUDE_LIBRARIES process)
+endif()
 
 AddJsonPackage(boost)
 
@@ -514,7 +524,12 @@ endfunction()
 # =============================================
 
 if (APPLE)
-    foreach(fw Carbon Metal Cocoa IOKit CoreVideo CoreMedia Security UniformTypeIdentifiers)
+    if(IOS)
+        set(apple_frameworks Foundation CoreFoundation CFNetwork UIKit Metal QuartzCore CoreVideo CoreMedia Security UniformTypeIdentifiers)
+    else()
+        set(apple_frameworks Carbon Metal Cocoa IOKit CoreVideo CoreMedia Security UniformTypeIdentifiers)
+    endif()
+    foreach(fw IN LISTS apple_frameworks)
         find_library(${fw}_LIBRARY ${fw} REQUIRED)
         list(APPEND PLATFORM_LIBRARIES ${${fw}_LIBRARY})
     endforeach()
@@ -549,7 +564,9 @@ if (ARCHITECTURE_x86 OR ARCHITECTURE_x86_64)
 endif()
 
 if (NOT YUZU_STATIC_ROOM)
-    find_package(libusb)
+    if(ENABLE_LIBUSB)
+        find_package(libusb)
+    endif()
     find_package(VulkanMemoryAllocator)
     find_package(VulkanUtilityLibraries)
     find_package(SimpleIni)
@@ -569,7 +586,7 @@ if (NOT YUZU_STATIC_ROOM)
         find_package(oaknut)
     endif()
 
-    if (NOT ANDROID)
+    if (ENABLE_SDL3)
         find_package(SDL3)
     endif()
 
@@ -708,6 +725,26 @@ if (MSVC AND CXX_CLANG)
 endif()
 
 add_subdirectory(src)
+
+option(SUYU_BUILD_IOS_CORE_PROBE "Build iHorizon with the real iOS core initialization probe" OFF)
+if(SUYU_BUILD_IOS_CORE_PROBE)
+    if(NOT IOS OR NOT SUYU_NO_JIT)
+        message(FATAL_ERROR "The iHorizon core probe requires iOS and SUYU_NO_JIT")
+    endif()
+    set(IHORIZON_APP_SOURCE "" CACHE PATH "iHorizon launcher source directory")
+    if(NOT EXISTS "${IHORIZON_APP_SOURCE}/apple/main.mm")
+        message(FATAL_ERROR "Set IHORIZON_APP_SOURCE to the iHorizon checkout")
+    endif()
+    add_subdirectory(research/ios)
+    set_property(TARGET iHorizon PROPERTY SOURCES
+        "${IHORIZON_APP_SOURCE}/apple/main.mm"
+        "${CMAKE_CURRENT_SOURCE_DIR}/research/ios/src/core_probe.cpp")
+    target_include_directories(iHorizon PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(iHorizon PRIVATE IHORIZON_WITH_CORE=1)
+    target_link_libraries(iHorizon PRIVATE core input_common frontend_common objc ${PLATFORM_LIBRARIES})
+    set_target_properties(iHorizon PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${IHORIZON_APP_SOURCE}/apple/Info.plist.in")
+endif()
 
 if (ENABLE_DEBUG_TOOLS)
     add_subdirectory(tools/maxwell-disas)
