@@ -57,11 +57,11 @@ Upstream was inconsistent about its own version — the repository is named
 to `v0.04`. This fork normalises to the three-part form. Read literally, `v0.04`
 means 0.4, which was evidently not the intent.
 
-Platforms: Windows and Linux both build and run. macOS (arm64) builds and
-launches — the GUI comes up, and the Vulkan device it uses is the MoltenVK
-copied into the bundle — see [macOS](#macos). No title has been booted there
-yet, and tests are off in that configuration. Android is inherited from upstream
-and untested since the fork; iOS is not included.
+Platforms: Windows and Linux both build and run. macOS (arm64) builds and runs.
+The GUI comes up, and games now boot under Vulkan/MoltenVK with the bundled
+MoltenVK library; see [macOS](#macos).
+Tests are off in that configuration. Android is inherited from upstream and
+untested since the fork; iOS is not included.
 
 Linux needs five things Windows does not, all handled by
 [`scripts/build-suyu.sh`][bld] in the consuming project:
@@ -223,7 +223,7 @@ As derived from §512(f), if Nintendo (or an affiliated entity) knowingly materi
 All three platforms below are verified: the Linux instructions were run end to
 end in a clean Ubuntu 24.04 container, the Windows ones from a fresh clone, and
 the macOS ones from a clean checkout on an M4 Pro (AppleClang 21, macOS 26 SDK).
-Nothing here fetches a game, keys or firmware — those are yours to supply.
+Nothing here fetches a game, keys or firmware. Those are yours to supply.
 
 CMake **3.31 or newer** is required. `CMakeModules/CPMUtil.cmake` demands it and
 Ubuntu 24.04 ships 3.28, so on most distributions it has to come from Kitware
@@ -339,8 +339,8 @@ cmake --build build-macos --target suyu suyu-cmd
 `-DVulkanHeaders_FORCE_BUNDLED=ON` is the macOS counterpart of Linux's
 `fmt_FORCE_BUNDLED`. Homebrew's `vulkan-headers` is found while
 `vulkan-utility-libraries` is not, and `AddDependentPackages` refuses that
-mixture — configure stops with *"Partial dependency installation detected"* —
-rather than pair a system copy of one with a bundled copy of the other. On a
+mixture, so configure stops with *"Partial dependency installation detected"*
+rather than pairing a system copy of one with a bundled copy of the other. On a
 machine with neither installed the flag is not needed.
 
 glslang 16 ships `glslang` with `glslangValidator` as a symlink to it, so the
@@ -355,17 +355,9 @@ copy that gets loaded: `Vulkan::OpenLibrary` tries the bundle's
 search path. The app therefore does not need MoltenVK installed. Pass
 `-DYUZU_USE_BUNDLED_MOLTENVK=OFF` to prefer an installed MoltenVK instead.
 
-The macOS build also had one CMake defect, now fixed. `src/suyu/CMakeLists.txt`
-called `download_moltenvk_external`, which is defined in
-`CMakeModules/DownloadExternals.cmake` — a file no CMake file includes any more,
-because MoltenVK moved to `externals/CMakeLists.txt`. Configure died on
-*"Unknown CMake command"*; the GUI now takes the `MOLTENVK_LIBRARY` value that
-`externals` already sets, and the `USE_SYSTEM_MOLTENVK` guard that chose
-between them (also defined nowhere) is gone with it.
-
-macOS has no NCE — `HAS_NCE` is Android and Linux arm64 only — so the CPU runs
-on dynarmic's arm64 backend, whose Mach exception handler does build and link
-here.
+macOS does not have NCE support yet. `HAS_NCE` is enabled for Android and Linux
+arm64 only, so the CPU runs on dynarmic's arm64 backend, whose Mach
+exception handler builds and links here.
 
 ### Android
 

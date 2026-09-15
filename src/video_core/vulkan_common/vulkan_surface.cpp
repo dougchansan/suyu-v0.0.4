@@ -32,6 +32,11 @@ vk::SurfaceKHR CreateSurface(
     }
 #elif defined(__APPLE__)
     if (window_info.type == Core::Frontend::WindowSystemType::Cocoa) {
+        if (!window_info.render_surface) {
+            LOG_ERROR(Render_Vulkan,
+                      "Failed to initialize Metal surface: CAMetalLayer is missing");
+            throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+        }
         const VkMetalSurfaceCreateInfoEXT metal_ci = {
             .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
             .pNext = nullptr,

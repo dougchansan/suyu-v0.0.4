@@ -14,6 +14,47 @@
 #include <objc/message.h>
 #endif
 
+#if defined(__APPLE__)
+namespace {
+id FindMetalLayerInTree(id layer, Class metal_layer_class) {
+    // Qt may expose a QContainerLayer here; MoltenVK needs the actual CAMetalLayer.
+    if (!layer || !metal_layer_class) {
+        return nullptr;
+    }
+
+    const SEL is_kind_of_class = sel_registerName("isKindOfClass:");
+    if (reinterpret_cast<bool (*)(id, SEL, Class)>(objc_msgSend)(
+            layer, is_kind_of_class, metal_layer_class)) {
+        return layer;
+    }
+
+    // Search descendants because the Metal layer may be nested below Qt's wrappers.
+    const SEL sublayers_selector = sel_registerName("sublayers");
+    id sublayers =
+        reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(layer, sublayers_selector);
+    if (!sublayers) {
+        return nullptr;
+    }
+
+    const SEL count_selector = sel_registerName("count");
+    const SEL object_at_index_selector = sel_registerName("objectAtIndex:");
+    const auto count =
+        reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend)(sublayers, count_selector);
+    for (unsigned long i = 0; i < count; ++i) {
+        id metal_layer = FindMetalLayerInTree(
+            reinterpret_cast<id (*)(id, SEL, unsigned long)>(objc_msgSend)(
+                sublayers, object_at_index_selector, i),
+            metal_layer_class);
+        if (metal_layer) {
+            return metal_layer;
+        }
+    }
+
+    return nullptr;
+}
+} // namespace
+#endif
+
 namespace QtCommon {
 Core::Frontend::WindowSystemType GetWindowSystemType() {
     // Determine WSI type based on Qt platform.
@@ -46,34 +87,10 @@ Core::Frontend::EmuWindow::WindowSystemInfo GetWindowSystemInfo(QWindow* window)
     id layer = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
         reinterpret_cast<id>(window->winId()), sel_registerName("layer"));
 
-    // In Qt 6, the layer of the NSView might be a QContainerLayer.
-    // VK_EXT_metal_surface needs a CAMetalLayer. We search for it in sublayers.
-    Class metal_layer_class = objc_getClass("CAMetalLayer");
-    id metal_layer = nullptr;
-
-    if (layer) {
-        if (reinterpret_cast<bool (*)(id, SEL, Class)>(objc_msgSend)(
-                layer, sel_registerName("isKindOfClass:"), metal_layer_class)) {
-            metal_layer = layer;
-        } else {
-            id sublayers = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
-                layer, sel_registerName("sublayers"));
-            if (sublayers) {
-                unsigned long count = reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend)(
-                    sublayers, sel_registerName("count"));
-                for (unsigned long i = 0; i < count; ++i) {
-                    id sublayer = reinterpret_cast<id (*)(id, SEL, unsigned long)>(objc_msgSend)(
-                        sublayers, sel_registerName("objectAtIndex:"), i);
-                    if (reinterpret_cast<bool (*)(id, SEL, Class)>(objc_msgSend)(
-                            sublayer, sel_registerName("isKindOfClass:"), metal_layer_class)) {
-                        metal_layer = sublayer;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    wsi.render_surface = reinterpret_cast<void*>(metal_layer ? metal_layer : layer);
+    // In Qt 6, the NSView layer might be a QContainerLayer. Search the entire
+    // layer tree for the CAMetalLayer required by VK_EXT_metal_surface.
+    id metal_layer = FindMetalLayerInTree(layer, objc_getClass("CAMetalLayer"));
+    wsi.render_surface = reinterpret_cast<void*>(metal_layer);
 #else
     QPlatformNativeInterface* pni = QGuiApplication::platformNativeInterface();
     wsi.display_connection = pni->nativeResourceForWindow("display", window);
