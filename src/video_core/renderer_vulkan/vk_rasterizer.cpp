@@ -488,10 +488,10 @@ void RasterizerVulkan::Clear(u32 layer_count) {
             std::memcpy(clear_value.color.float32, regs.clear_color.data(), regs.clear_color.size() * sizeof(f32));
         } else if (!is_signed) {
             for (size_t i = 0; i < 4; i++)
-                clear_value.color.uint32[i] = u32(f32(u64(int_size) << 1U) * regs.clear_color[i]);
+                clear_value.color.uint32[i] = u32(f32((1ULL << int_size) - 1) * regs.clear_color[i]);
         } else {
             for (size_t i = 0; i < 4; i++)
-                clear_value.color.int32[i] = s32(f32(s64(int_size - 1) << 1) * (regs.clear_color[i] - 0.5f));
+                clear_value.color.int32[i] = s32(f32((1LL << (int_size - 1)) - 1) * (regs.clear_color[i] * 2.0f - 1.0f));
         }
 
         if (regs.clear_surface.R && regs.clear_surface.G && regs.clear_surface.B && regs.clear_surface.A) {

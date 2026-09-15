@@ -371,6 +371,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
                       member.user_data.username) != username_ban_list.end()) {
 
             SendUserBanned(event->peer);
+            enet_peer_disconnect(event->peer, 0);
             return;
         }
 
@@ -381,6 +382,7 @@ void Room::RoomImpl::HandleJoinRequest(const ENetEvent* event) {
 
         if (std::find(ip_ban_list.begin(), ip_ban_list.end(), ip) != ip_ban_list.end()) {
             SendUserBanned(event->peer);
+            enet_peer_disconnect(event->peer, 0);
             return;
         }
     }

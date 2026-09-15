@@ -336,6 +336,12 @@ bool RemoveDirContentsRecursively(const fs::path& path) {
             break;
         }
 
+        if (entry.status().type() == fs::file_type::directory) {
+            if (!RemoveDirContentsRecursively(entry.path())) {
+                break;
+            }
+        }
+
         fs::remove(entry.path(), ec);
 
         if (ec) {
@@ -343,12 +349,6 @@ bool RemoveDirContentsRecursively(const fs::path& path) {
                       "Failed to remove the filesystem object at path={}, ec_message={}",
                       PathToUTF8String(entry.path()), ec.message());
             break;
-        }
-
-        // TODO (Morph): Remove this when MSVC fixes recursive_directory_iterator.
-        // recursive_directory_iterator throws an exception despite passing in a std::error_code.
-        if (entry.status().type() == fs::file_type::directory) {
-            return RemoveDirContentsRecursively(entry.path());
         }
     }
 

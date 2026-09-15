@@ -594,7 +594,7 @@ if (SUYU_USE_BUNDLED_QT AND QT_VERSION VERSION_LESS 6)
 endif()
 
 if (ENABLE_SDL2)
-    target_link_libraries(suyu PRIVATE SDL2::SDL2)
+    target_link_libraries(suyu PRIVATE SDL3::SDL3)
     target_compile_definitions(suyu PRIVATE HAVE_SDL2)
 endif()
 
