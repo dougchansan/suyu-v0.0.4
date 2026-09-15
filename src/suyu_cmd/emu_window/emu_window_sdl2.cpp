@@ -15,6 +15,7 @@ static constexpr Uint8 SDL_RELEASED = 0;
 #include "hid_core/hid_core.h"
 #include "input_common/drivers/keyboard.h"
 #include "input_common/drivers/mouse.h"
+#include "input_common/drivers/tas_input.h"
 #include "input_common/drivers/touch_screen.h"
 #include "input_common/main.h"
 #include "common/param_package.h"
@@ -573,6 +574,49 @@ void EmuWindow_SDL2::OnKeyEvent(int key, u8 state) {
 
 bool EmuWindow_SDL2::IsOpen() const {
     return is_open;
+}
+
+void EmuWindow_SDL2::EnableTasPlayback() {
+    tas_playback = true;
+}
+
+void EmuWindow_SDL2::OnFrameDisplayed() {
+    if (!tas_playback) {
+        return;
+    }
+    // Called on the render thread once per presented frame. The TAS driver
+    // consumes exactly one command per call, which is what keeps a recorded
+    // script deterministic against the frames the guest actually renders.
+    auto* const tas = input_subsystem->GetTas();
+    tas->UpdateThread();
+
+    const auto [state, progress, lengths] = tas->GetStatus();
+    if (!tas_started) {
+        // Start on the first displayed frame rather than at load: before the
+        // guest presents anything there is no frame for command zero to land
+        // on. Reset reloads the script so playback always begins at the top.
+        tas->Reset();
+        tas->StartStop();
+        tas_started = true;
+        LOG_INFO(Frontend, "TAS playback started, {} frames queued", lengths[0]);
+        return;
+    }
+    if (state != InputCommon::TasInput::TasState::Stopped) {
+        tas_progress = progress;
+        return;
+    }
+    // Playback ran off the end of the script and tas_loop is off. Quitting here
+    // is what makes --tas usable unattended; without it the replay finishes and
+    // the process sits idle until something kills it.
+    LOG_INFO(Frontend, "TAS playback finished, {} of {} frames, exiting", tas_progress,
+             lengths[0]);
+    tas_playback = false;
+    // WaitEvent is blocked in SDL_WaitEvent on the main thread. SDL_PushEvent is
+    // thread safe, and the main thread turns SDL_EVENT_QUIT into is_open = false,
+    // so the shutdown stays on the thread that owns the window.
+    SDL_Event quit_event{};
+    quit_event.type = SDL_EVENT_QUIT;
+    SDL_PushEvent(&quit_event);
 }
 
 bool EmuWindow_SDL2::IsShown() const {
