@@ -619,7 +619,28 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (!key.state.dynamic_vertex_input) {
         const size_t num_vertex_arrays = (std::min)(
             Maxwell::NumVertexArrays, static_cast<size_t>(device.GetMaxVertexInputBindings()));
+        // Declare only the bindings an enabled attribute actually reads. A
+        // binding no attribute references does nothing, and declaring all 32
+        // leaves most of them with no buffer bound, which every draw then
+        // reports as VUID-vkCmdDraw*-None-04007. It also costs real resources
+        // on Metal, where each declared binding consumes one of the vertex
+        // stage's limited buffer argument slots and MoltenVK reserves several
+        // of those for itself. Binding numbers are indices, not positions, so
+        // a sparse set stays consistent with vkCmdBindVertexBuffers.
+        u32 used_bindings{};
+        for (size_t index = 0; index < key.state.attributes.size(); ++index) {
+            const auto& attribute = key.state.attributes[index];
+            if (!attribute.enabled || !stage_infos[0].loads.Generic(index)) {
+                continue;
+            }
+            if (static_cast<size_t>(attribute.buffer) < num_vertex_arrays) {
+                used_bindings |= 1U << attribute.buffer;
+            }
+        }
         for (size_t index = 0; index < num_vertex_arrays; ++index) {
+            if ((used_bindings & (1U << index)) == 0) {
+                continue;
+            }
             const bool instanced = key.state.binding_divisors[index] != 0;
             const auto rate =
                 instanced ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
