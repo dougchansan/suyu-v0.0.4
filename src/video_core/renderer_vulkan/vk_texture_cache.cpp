@@ -1006,18 +1006,44 @@ void TextureCacheRuntime::ReinterpretImage(Image& dst, Image& src,
     const VkImageAspectFlags src_aspect_mask = src.AspectMask();
     const VkImageAspectFlags dst_aspect_mask = dst.AspectMask();
 
-    const auto bpp_in = BytesPerBlock(src.info.format) / DefaultBlockWidth(src.info.format);
-    const auto bpp_out = BytesPerBlock(dst.info.format) / DefaultBlockWidth(dst.info.format);
-    std::ranges::transform(copies, vk_in_copies.begin(),
-                           [src_aspect_mask, bpp_in, bpp_out](const auto& copy) {
-                               auto copy2 = copy;
-                               copy2.src_offset.x = (bpp_out * copy.src_offset.x) / bpp_in;
-                               copy2.extent.width = (bpp_out * copy.extent.width) / bpp_in;
-                               return MakeBufferImageCopy(copy2, true, src_aspect_mask);
-                           });
-    std::ranges::transform(copies, vk_out_copies.begin(), [dst_aspect_mask](const auto& copy) {
-        return MakeBufferImageCopy(copy, false, dst_aspect_mask);
-    });
+    const auto dst_block_w = DefaultBlockWidth(dst.info.format);
+    const auto dst_block_h = DefaultBlockHeight(dst.info.format);
+    const bool block_mismatch = DefaultBlockWidth(src.info.format) != dst_block_w ||
+                                DefaultBlockHeight(src.info.format) != dst_block_h;
+    if (block_mismatch) {
+        // Compressed destination fed from an uncompressed source, one source
+        // texel per destination block. Extents arrive in blocks, so a 128x128
+        // BC3 mip is described as 32x32 and the source image is 32x32 texels.
+        // The source side wants those extents as they stand; only the
+        // destination has to be expressed in texels, which is what
+        // vkCmdCopyBufferToImage takes for a compressed image.
+        std::ranges::transform(copies, vk_in_copies.begin(),
+                               [src_aspect_mask](const auto& copy) {
+                                   return MakeBufferImageCopy(copy, true, src_aspect_mask);
+                               });
+        std::ranges::transform(copies, vk_out_copies.begin(),
+                               [dst_aspect_mask, dst_block_w, dst_block_h](const auto& copy) {
+                                   auto copy2 = copy;
+                                   copy2.dst_offset.x *= dst_block_w;
+                                   copy2.dst_offset.y *= dst_block_h;
+                                   copy2.extent.width *= dst_block_w;
+                                   copy2.extent.height *= dst_block_h;
+                                   return MakeBufferImageCopy(copy2, false, dst_aspect_mask);
+                               });
+    } else {
+        const auto bpp_in = BytesPerBlock(src.info.format) / DefaultBlockWidth(src.info.format);
+        const auto bpp_out = BytesPerBlock(dst.info.format) / DefaultBlockWidth(dst.info.format);
+        std::ranges::transform(copies, vk_in_copies.begin(),
+                               [src_aspect_mask, bpp_in, bpp_out](const auto& copy) {
+                                   auto copy2 = copy;
+                                   copy2.src_offset.x = (bpp_out * copy.src_offset.x) / bpp_in;
+                                   copy2.extent.width = (bpp_out * copy.extent.width) / bpp_in;
+                                   return MakeBufferImageCopy(copy2, true, src_aspect_mask);
+                               });
+        std::ranges::transform(copies, vk_out_copies.begin(), [dst_aspect_mask](const auto& copy) {
+            return MakeBufferImageCopy(copy, false, dst_aspect_mask);
+        });
+    }
     const u32 img_bpp = BytesPerBlock(dst.info.format);
     size_t total_size = 0;
     for (const auto& copy : copies) {
@@ -1443,8 +1469,27 @@ bool TextureCacheRuntime::IsFormatScalable(PixelFormat format) {
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                                     std::span<const VideoCommon::ImageCopy> copies) {
     // As per the size-compatible formats section of vulkan, copy manually via ReinterpretImage
-    // these images that aren't size-compatible
-    if (BytesPerBlock(src.info.format) != BytesPerBlock(dst.info.format)) {
+    // these images that aren't size-compatible.
+    //
+    // On MoltenVK, differing block dimensions go the same way. Vulkan permits
+    // copying between a compressed format and an uncompressed one of the same
+    // block size - the BCn upload path pairs BC3_UNORM (4x4 blocks) with
+    // R32G32B32A32_UINT (1x1) - but Metal has no such copy. MoltenVK rejects it
+    // with VK_ERROR_FEATURE_NOT_PRESENT and throws, which reaches no handler and
+    // takes the process down.
+    //
+    // This is keyed to the driver rather than applied everywhere on purpose.
+    // Desktop drivers perform the copy correctly, and ReinterpretImage cannot
+    // stand in for it there: routing these pairs through it unconditionally
+    // makes NVIDIA throw out of the same call instead.
+    const bool size_compatible =
+        BytesPerBlock(src.info.format) == BytesPerBlock(dst.info.format);
+    const bool blocks_match =
+        DefaultBlockWidth(src.info.format) == DefaultBlockWidth(dst.info.format) &&
+        DefaultBlockHeight(src.info.format) == DefaultBlockHeight(dst.info.format);
+    const bool metal_block_limit =
+        !blocks_match && device.GetDriverID() == VK_DRIVER_ID_MOLTENVK;
+    if (!size_compatible || metal_block_limit) {
 #ifdef _WIN32
         // On Windows, linear images cause device loss when used in image copies.
         // Tested with TitleID: 0x010067300059A00 (Mario + Rabbids Kingdom Battle)
