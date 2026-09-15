@@ -1443,8 +1443,20 @@ bool TextureCacheRuntime::IsFormatScalable(PixelFormat format) {
 void TextureCacheRuntime::CopyImage(Image& dst, Image& src,
                                     std::span<const VideoCommon::ImageCopy> copies) {
     // As per the size-compatible formats section of vulkan, copy manually via ReinterpretImage
-    // these images that aren't size-compatible
-    if (BytesPerBlock(src.info.format) != BytesPerBlock(dst.info.format)) {
+    // these images that aren't size-compatible.
+    //
+    // Differing block dimensions go the same way. Vulkan permits copying between a
+    // compressed format and an uncompressed one of the same block size - the BCn
+    // upload path pairs BC3_UNORM (4x4 blocks) with R32G32B32A32_UINT (1x1) and
+    // desktop drivers honour it - but Metal has no such copy. MoltenVK rejects it
+    // with VK_ERROR_FEATURE_NOT_PRESENT and throws, which reaches no handler and
+    // takes the process down.
+    const bool size_compatible =
+        BytesPerBlock(src.info.format) == BytesPerBlock(dst.info.format);
+    const bool blocks_match =
+        DefaultBlockWidth(src.info.format) == DefaultBlockWidth(dst.info.format) &&
+        DefaultBlockHeight(src.info.format) == DefaultBlockHeight(dst.info.format);
+    if (!size_compatible || !blocks_match) {
 #ifdef _WIN32
         // On Windows, linear images cause device loss when used in image copies.
         // Tested with TitleID: 0x010067300059A00 (Mario + Rabbids Kingdom Battle)

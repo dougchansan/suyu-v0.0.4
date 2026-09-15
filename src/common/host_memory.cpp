@@ -411,6 +411,19 @@ static void* ChooseVirtualBase(size_t virtual_size) {
     // For Qualcomm devices, we must also allocate memory above 36 bits.
     const size_t lower = Map36BitSize / HugePageSize;
     const size_t upper = (Map39BitSize - virtual_size) / HugePageSize;
+
+    // A reservation that is itself 39 bits wide leaves no room inside the 36..39 bit
+    // window, so `upper` lands at or below `lower` and the subtraction below wraps. Every
+    // hint derived from that wrapped range is garbage, all 64 attempts miss, and fastmem is
+    // silently lost. Only arm64 without NCE reserves 39 bits -- Android and Linux arm64 set
+    // HAS_NCE and reserve 38 -- so macOS is the one configuration that reaches this. The
+    // low-address requirement is a Qualcomm driver quirk and does not apply there, so let
+    // the kernel place the reservation instead.
+    if (upper <= lower) {
+        return mmap(nullptr, virtual_size, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    }
+
     const size_t range = upper - lower;
 
     // Try up to 64 times to allocate memory at random addresses in the range.
@@ -435,7 +448,11 @@ static void* ChooseVirtualBase(size_t virtual_size) {
         }
     }
 
-    return MAP_FAILED;
+    // The window exists but nothing in it was free. A placement the kernel picks is still a
+    // working fastmem arena -- the address only has to be stable, not low -- so this is
+    // better than dropping to the software page table.
+    return mmap(nullptr, virtual_size, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
 }
 
 #else
@@ -506,12 +523,28 @@ public:
     {}
 
     bool Init() {
-        long page_size = sysconf(_SC_PAGESIZE);
-        if (page_size != 0x1000) {
+        const long queried_page_size = sysconf(_SC_PAGESIZE);
+        if (queried_page_size <= 0 ||
+            (queried_page_size & (queried_page_size - 1)) != 0 ||
+            static_cast<size_t>(queried_page_size) < GuestPageSize) {
             LOG_WARNING(HW_Memory,
-                        "Host page size {} cannot support 4K fastmem mappings; using software page-table backing",
-                        page_size);
+                        "Unusable host page size {}; using software page-table backing",
+                        queried_page_size);
             return false;
+        }
+        host_page_size = static_cast<size_t>(queried_page_size);
+        if (host_page_size > GuestPageSize) {
+            // Apple Silicon runs 16 KiB pages while the guest works in 4 KiB ones, so a
+            // mapping can only be placed when the guest-to-backing delta is a whole number
+            // of host pages. Where it is, the host-page-aligned interior gets a real
+            // mapping and the ragged edges are left as holes. A hole faults, and the
+            // dynarmic fastmem fault handler marks that access do-not-fastmem and
+            // recompiles the block onto the page-table path, so partial coverage costs
+            // speed on the remainder and nothing else.
+            LOG_INFO(HW_Memory,
+                     "Host page size {:#x} exceeds the {:#x} guest page; fastmem covers the "
+                     "host-page-aligned interior of each mapping",
+                     host_page_size, GuestPageSize);
         }
         // Backing memory initialization
 #if defined(__sun__) || defined(__HAIKU__) || defined(__NetBSD__) || defined(__DragonFly__)
@@ -592,8 +625,19 @@ public:
         if (True(perms & MemoryPermission::Execute))
             prot_flags |= PROT_EXEC;
 #endif
+        size_t map_offset{};
+        size_t map_host_offset{};
+        size_t map_length{};
+        if (!HostMappableRange(virtual_offset, host_offset, length, &map_offset, &map_host_offset,
+                               &map_length)) {
+            // No whole host page of this range can be placed. Leaving it as a hole makes the
+            // access fault into the page-table path rather than read a stale mapping.
+            return;
+        }
+
         int flags = (fd >= 0 ? MAP_SHARED : MAP_PRIVATE) | MAP_FIXED;
-        void* ret = mmap(virtual_base + virtual_offset, length, prot_flags, flags, fd, host_offset);
+        void* ret =
+            mmap(virtual_base + map_offset, map_length, prot_flags, flags, fd, map_host_offset);
         ASSERT_MSG(ret != MAP_FAILED, "mmap: {} {}", strerror(errno), fd);
     }
 
@@ -608,7 +652,17 @@ public:
         auto [merged_pointer, merged_size] =
             free_manager.FreeBlock(virtual_base + virtual_offset, length);
 
-        void* ret = mmap(merged_pointer, merged_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        // Round outward. Leaving any part of a freed range mapped would let the guest read a
+        // stale backing page instead of faulting. Overshooting can clip the fastmem interior
+        // of a neighbour, which only costs that neighbour a fallback, never correctness.
+        u8* reserve_pointer = static_cast<u8*>(merged_pointer);
+        size_t reserve_size = merged_size;
+        RoundOutwardToHostPages(&reserve_pointer, &reserve_size);
+        if (reserve_size == 0) {
+            return;
+        }
+
+        void* ret = mmap(reserve_pointer, reserve_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
         ASSERT_MSG(ret != MAP_FAILED, "mmap: {}", strerror(errno));
     }
 
@@ -628,7 +682,15 @@ public:
             flags |= PROT_EXEC;
         }
 #endif
-        int ret = mprotect(virtual_base + virtual_offset, length, flags);
+        // Round inward: the ragged edges were never given a mapping, so there is nothing
+        // there whose permissions could go stale.
+        size_t prot_offset = virtual_offset;
+        size_t prot_length = length;
+        if (!RoundInwardToHostPages(&prot_offset, &prot_length)) {
+            return;
+        }
+
+        int ret = mprotect(virtual_base + prot_offset, prot_length, flags);
         ASSERT_MSG(ret == 0, "mprotect failed: {}", strerror(errno));
     }
 
@@ -662,6 +724,77 @@ private:
         }
     }
 
+    /// Guest page size. Horizon maps at this granularity regardless of the host.
+    static constexpr size_t GuestPageSize = 0x1000;
+
+    /// Largest sub-range of [virtual_offset, +length) that mmap can place, given that the
+    /// backing offset has to move in step with the virtual address. Returns false when no
+    /// whole host page of the range qualifies.
+    bool HostMappableRange(size_t virtual_offset, size_t host_offset, size_t length,
+                           size_t* out_virtual_offset, size_t* out_host_offset,
+                           size_t* out_length) const {
+        if (length == 0) {
+            return false;
+        }
+        if (host_page_size <= GuestPageSize) {
+            *out_virtual_offset = virtual_offset;
+            *out_host_offset = host_offset;
+            *out_length = length;
+            return true;
+        }
+        // mmap shifts the virtual address and the backing offset together, so the two can
+        // only be aligned at once when they differ by a whole number of host pages.
+        if (((virtual_offset - host_offset) & (host_page_size - 1)) != 0) {
+            return false;
+        }
+        const size_t begin = (virtual_offset + host_page_size - 1) & ~(host_page_size - 1);
+        const size_t end = (virtual_offset + length) & ~(host_page_size - 1);
+        if (end <= begin) {
+            return false;
+        }
+        *out_virtual_offset = begin;
+        *out_host_offset = host_offset + (begin - virtual_offset);
+        *out_length = end - begin;
+        return true;
+    }
+
+    /// Grow a range to whole host pages, clamped to the arena.
+    void RoundOutwardToHostPages(u8** pointer, size_t* size) const {
+        if (host_page_size <= GuestPageSize || *size == 0) {
+            return;
+        }
+        const size_t mask = host_page_size - 1;
+        const size_t raw_begin = reinterpret_cast<size_t>(*pointer);
+        const size_t begin = raw_begin & ~mask;
+        const size_t end = (raw_begin + *size + mask) & ~mask;
+        const size_t arena_begin = reinterpret_cast<size_t>(virtual_map_base);
+        const size_t arena_end = arena_begin + virtual_size;
+        const size_t clamped_begin = (std::max)(begin, arena_begin);
+        const size_t clamped_end = (std::min)(end, arena_end);
+        if (clamped_end <= clamped_begin) {
+            *size = 0;
+            return;
+        }
+        *pointer = reinterpret_cast<u8*>(clamped_begin);
+        *size = clamped_end - clamped_begin;
+    }
+
+    /// Shrink a range to whole host pages. False when nothing is left.
+    bool RoundInwardToHostPages(size_t* offset, size_t* length) const {
+        if (host_page_size <= GuestPageSize) {
+            return *length != 0;
+        }
+        const size_t mask = host_page_size - 1;
+        const size_t begin = (*offset + mask) & ~mask;
+        const size_t end = (*offset + *length) & ~mask;
+        if (end <= begin) {
+            return false;
+        }
+        *offset = begin;
+        *length = end - begin;
+        return true;
+    }
+
     void AdjustMap(size_t* virtual_offset, size_t* length) {
         if (virtual_base != nullptr) {
             return;
@@ -684,6 +817,7 @@ private:
     }
 
     int fd{-1}; // memfd file descriptor, -1 is the error value of memfd_create
+    size_t host_page_size{GuestPageSize};
     FreeRegionManager free_manager{};
 };
 
