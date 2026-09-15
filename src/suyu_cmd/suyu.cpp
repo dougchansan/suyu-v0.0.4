@@ -118,6 +118,9 @@ static void PrintHelp(const char* argv0) {
                  "-m, --multiplayer=nick:password@address:port"
                  " Nickname, password, address and port for multiplayer\n"
                  "-p, --program         Pass following string as arguments to executable\n"
+                 "-t, --tas             Replay the TAS script from the user tas directory,\n"
+                 "                      starting at the first displayed frame and exiting\n"
+                 "                      when the script runs out\n"
                  "-u, --user            Select a specific user profile from 0 to 7\n"
                  "-v, --version         Output version information and exit\n"
                  "-l, "
@@ -708,6 +711,7 @@ int main(int argc, char** argv) {
 
     bool use_multiplayer = false;
     bool fullscreen = false;
+    bool tas_playback = false;
     Service::AM::FrontendAppletParameters load_parameters{};
     std::string nickname{};
     std::string password{};
@@ -723,6 +727,7 @@ int main(int argc, char** argv) {
         {"applet-params", optional_argument, 0, 'l'},
         {"multiplayer", required_argument, 0, 'm'},
         {"program", optional_argument, 0, 'p'},
+        {"tas", no_argument, 0, 't'},
         {"user", required_argument, 0, 'u'},
         {"version", no_argument, 0, 'v'},
         {0, 0, 0, 0},
@@ -730,7 +735,7 @@ int main(int argc, char** argv) {
     };
 
     while (optind < argc) {
-        int arg = getopt_long(argc, argv, "g:fhvp::c:u:l::", long_options, &option_index);
+        int arg = getopt_long(argc, argv, "g:fhvp::c:u:l::t", long_options, &option_index);
         if (arg != -1) {
             switch (static_cast<char>(arg)) {
             case 'c':
@@ -802,6 +807,9 @@ int main(int argc, char** argv) {
                 }
                 break;
             }
+            case 't':
+                tas_playback = true;
+                break;
             case 'p':
                 program_args = argv[optind];
                 ++optind;
@@ -837,6 +845,13 @@ int main(int argc, char** argv) {
 
     if (selected_user.has_value()) {
         Settings::values.current_user = std::clamp(*selected_user, 0, 7);
+    }
+
+    if (tas_playback) {
+        // Must be set before the input subsystem is constructed: the TAS driver
+        // only reads the scripts out of the TAS directory when it sees this
+        // enabled, and it is applied here so the config file cannot clear it.
+        Settings::values.tas_enable.SetValue(true);
     }
 
 #ifdef _WIN32
@@ -1059,6 +1074,10 @@ int main(int argc, char** argv) {
     default:
         emu_window = std::make_unique<EmuWindow_SDL2_VK>(&input_subsystem, system, fullscreen);
         break;
+    }
+
+    if (tas_playback) {
+        emu_window->EnableTasPlayback();
     }
 
 #ifdef _WIN32

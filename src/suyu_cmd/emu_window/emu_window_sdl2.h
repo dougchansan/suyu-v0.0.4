@@ -38,6 +38,10 @@ public:
     /// Wait for the next event on the main thread.
     void WaitEvent();
 
+    /// Replay the TAS script from the user TAS directory instead of waiting for
+    /// a hotkey, and quit once it runs out. Call before the system is run.
+    void EnableTasPlayback();
+
     // Sets the window icon from suyu.bmp
     void SetWindowIcon();
 
@@ -77,6 +81,20 @@ protected:
 
     /// Called when a configuration change affects the minimal size of the window
     void OnMinimalClientAreaChangeRequest(std::pair<u32, u32> minimal_size) override;
+
+    /// Called by the renderer after each presented frame. Drives TAS playback,
+    /// which advances one command per displayed frame.
+    void OnFrameDisplayed() override;
+
+    /// Whether --tas asked us to replay a script.
+    bool tas_playback = false;
+
+    /// Whether playback has been started. Set on the first displayed frame.
+    bool tas_started = false;
+
+    /// Last progress seen while running. The driver rewinds its counter to zero
+    /// when the script ends, so the final status cannot report how far it got.
+    std::size_t tas_progress = 0;
 
     /// Is the window still open?
     bool is_open = true;
