@@ -12,9 +12,10 @@ on:
     types: [opened, assigned]
 jobs:
   claude:
+    # Comments from bots (Claude's own progress comment, Codex) never re-trigger a run.
     if: |
-      (github.event.comment && contains(github.event.comment.body, '@claude')) ||
-      (github.event.issue && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event.comment && github.event.comment.user.type != 'Bot' && contains(github.event.comment.body, '@claude')) ||
+      (!github.event.comment && github.event.issue && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
     runs-on: ubuntu-latest
     permissions:
       contents: write
