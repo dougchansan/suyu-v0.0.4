@@ -57,8 +57,11 @@ Upstream was inconsistent about its own version — the repository is named
 to `v0.04`. This fork normalises to the three-part form. Read literally, `v0.04`
 means 0.4, which was evidently not the intent.
 
-Platforms: Windows and Linux both build and run. Android is inherited from
-upstream and untested since the fork; macOS/iOS are not included.
+Platforms: Windows and Linux both build and run. macOS (arm64) builds and runs.
+The GUI comes up, and games now boot under Vulkan/MoltenVK with the bundled
+MoltenVK library; see [macOS](#macos).
+Tests are off in that configuration. Android is inherited from upstream and
+untested since the fork; iOS is not included.
 
 Linux needs five things Windows does not, all handled by
 [`scripts/build-suyu.sh`][bld] in the consuming project:
@@ -187,9 +190,10 @@ As derived from §512(f), if Nintendo (or an affiliated entity) knowingly materi
 
 ## Building
 
-Both platforms below are verified: the Linux instructions were run end to end in
-a clean Ubuntu 24.04 container, and the Windows ones from a fresh clone. Nothing
-here fetches a game, keys or firmware — those are yours to supply.
+All three platforms below are verified: the Linux instructions were run end to
+end in a clean Ubuntu 24.04 container, the Windows ones from a fresh clone, and
+the macOS ones from a clean checkout on an M4 Pro (AppleClang 21, macOS 26 SDK).
+Nothing here fetches a game, keys or firmware. Those are yours to supply.
 
 CMake **3.31 or newer** is required. `CMakeModules/CPMUtil.cmake` demands it and
 Ubuntu 24.04 ships 3.28, so on most distributions it has to come from Kitware
@@ -279,6 +283,51 @@ and suyu's CMake still searches for the old name, so if configure stops with
 
 `suyu.exe` needs the Qt runtime beside it to start — `windeployqt` on the built
 executable copies it in.
+
+### macOS
+
+Apple Silicon (arm64), with the Xcode command line tools and Homebrew:
+
+```sh
+brew install cmake ninja pkgconf boost ffmpeg sdl3 libusb enet glslang nasm qt
+```
+
+Then the same configure as Linux, plus Homebrew's prefix so Qt, FFmpeg and SDL3
+are found:
+
+```sh
+cmake -B build-macos -GNinja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=OFF \
+  -DYUZU_TESTS=OFF -DENABLE_WEB_SERVICE=OFF \
+  -Dfmt_FORCE_BUNDLED=ON \
+  -DVulkanHeaders_FORCE_BUNDLED=ON \
+  -DCMAKE_PREFIX_PATH="$(brew --prefix)"
+cmake --build build-macos --target suyu suyu-cmd
+```
+
+`-DVulkanHeaders_FORCE_BUNDLED=ON` is the macOS counterpart of Linux's
+`fmt_FORCE_BUNDLED`. Homebrew's `vulkan-headers` is found while
+`vulkan-utility-libraries` is not, and `AddDependentPackages` refuses that
+mixture, so configure stops with *"Partial dependency installation detected"*
+rather than pairing a system copy of one with a bundled copy of the other. On a
+machine with neither installed the flag is not needed.
+
+glslang 16 ships `glslang` with `glslangValidator` as a symlink to it, so the
+host shader step still finds the program by the old name.
+
+Binaries land in `build-macos/bin`: `suyu.app` and `suyu-cmd`.
+
+MoltenVK comes from the bundled CPM package (`V380-Ori/Ryujinx.MoltenVK`,
+`v1.4.1-ryujinx`), is copied into `suyu.app/Contents/Frameworks/`, and is the
+copy that gets loaded: `Vulkan::OpenLibrary` tries the bundle's
+`libvulkan.1.dylib` and `libMoltenVK.dylib` before anything on the loader's
+search path. The app therefore does not need MoltenVK installed. Pass
+`-DYUZU_USE_BUNDLED_MOLTENVK=OFF` to prefer an installed MoltenVK instead.
+
+macOS does not have NCE support yet. `HAS_NCE` is enabled for Android and Linux
+arm64 only, so the CPU runs on dynarmic's arm64 backend, whose Mach
+exception handler builds and links here.
 
 ### Android
 

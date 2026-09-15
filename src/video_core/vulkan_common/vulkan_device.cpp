@@ -908,6 +908,18 @@ bool Device::GetSuitability(bool requires_swapchain) {
     // Minimum of API version 1.1 is required. (This is well-supported.)
     ASSERT(instance_version >= VK_API_VERSION_1_1);
 
+    // The decisions below branch on the driver identity, and the rest of the property chain is
+    // not fetched until the end of this function. Fetch the driver properties first, so the
+    // MoltenVK carve-outs can never read a default-initialised driver ID.
+    {
+        VkPhysicalDeviceProperties2 driver_properties{};
+        driver_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.driver.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+        properties.driver.pNext = nullptr;
+        driver_properties.pNext = &properties.driver;
+        physical.GetProperties2(driver_properties);
+    }
+
     // Get available extensions.
     auto extension_properties = physical.EnumerateDeviceExtensionProperties();
 
