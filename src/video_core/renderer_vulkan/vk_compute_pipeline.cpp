@@ -49,74 +49,81 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     num_descriptor_entries = NumDescriptorEntries(info);
 
     auto func{[this, &scheduler, &descriptor_pool, shader_notify, pipeline_statistics] {
-        DescriptorLayoutBuilder builder{device};
-        builder.Add(info, VK_SHADER_STAGE_COMPUTE_BIT);
-
-        uses_push_descriptor = builder.CanUsePushDescriptor();
-        descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
-        pipeline_layout = builder.CreatePipelineLayout(*descriptor_set_layout);
-        descriptor_update_template =
-            builder.CreateTemplate(*descriptor_set_layout, *pipeline_layout, uses_push_descriptor);
-        if (!uses_push_descriptor) {
-            descriptor_allocator = descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, info);
-        }
-        const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
-            .pNext = nullptr,
-            .requiredSubgroupSize = GuestWarpSize,
-        };
-        VkPipelineCreateFlags flags{};
-        if (device.IsKhrPipelineExecutablePropertiesEnabled() && Settings::values.renderer_debug.GetValue()) {
-            flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
-        }
-        const VkComputePipelineCreateInfo compute_ci{
-            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .pNext = nullptr,
-            .flags = flags,
-            .stage{
-                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                .pNext =
-                    device.IsExtSubgroupSizeControlSupported() ? &subgroup_size_ci : nullptr,
-                .flags = 0,
-                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-                .module = *spv_module,
-                .pName = "main",
-                .pSpecializationInfo = nullptr,
-            },
-            .layout = *pipeline_layout,
-            .basePipelineHandle = 0,
-            .basePipelineIndex = 0,
-        };
-        try {
-            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
-        } catch (const vk::Exception& exception) {
-            LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
-                         exception.what());
-            std::scoped_lock lock{build_mutex};
-            is_built = true;
-            build_condvar.notify_one();
+        // Publish on every exit path. Configure waits on is_built with no
+        // timeout, so anything that escapes here stalls the scheduler forever.
+        // Pipeline creation was already guarded; the descriptor layout and
+        // template calls above it were not.
+        const auto publish{[this, shader_notify] {
+            {
+                std::scoped_lock lock{build_mutex};
+                is_built = true;
+            }
+            build_condvar.notify_all();
             if (shader_notify) {
                 shader_notify->MarkShaderComplete();
             }
-            return;
-        }
+        }};
+        try {
+            DescriptorLayoutBuilder builder{device};
+            builder.Add(info, VK_SHADER_STAGE_COMPUTE_BIT);
 
-        // Log compute pipeline creation
-        if (GPU::Logging::IsActive()) {
-            GPU::Logging::GPULogger::GetInstance().LogPipelineStateChange(
-                "ComputePipeline created"
-            );
-        }
+            uses_push_descriptor = builder.CanUsePushDescriptor();
+            descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
+            pipeline_layout = builder.CreatePipelineLayout(*descriptor_set_layout);
+            descriptor_update_template =
+                builder.CreateTemplate(*descriptor_set_layout, *pipeline_layout, uses_push_descriptor);
+            if (!uses_push_descriptor) {
+                descriptor_allocator =
+                    descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, info);
+            }
+            const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
+                .sType =
+                    VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
+                .pNext = nullptr,
+                .requiredSubgroupSize = GuestWarpSize,
+            };
+            VkPipelineCreateFlags flags{};
+            if (device.IsKhrPipelineExecutablePropertiesEnabled() &&
+                Settings::values.renderer_debug.GetValue()) {
+                flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+            }
+            const VkComputePipelineCreateInfo compute_ci{
+                .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = flags,
+                .stage{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    .pNext =
+                        device.IsExtSubgroupSizeControlSupported() ? &subgroup_size_ci : nullptr,
+                    .flags = 0,
+                    .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                    .module = *spv_module,
+                    .pName = "main",
+                    .pSpecializationInfo = nullptr,
+                },
+                .layout = *pipeline_layout,
+                .basePipelineHandle = 0,
+                .basePipelineIndex = 0,
+            };
+            pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
 
-        if (pipeline_statistics) {
-            pipeline_statistics->Collect(device, *pipeline);
+            // Log compute pipeline creation
+            if (GPU::Logging::IsActive()) {
+                GPU::Logging::GPULogger::GetInstance().LogPipelineStateChange(
+                    "ComputePipeline created"
+                );
+            }
+
+            if (pipeline_statistics) {
+                pipeline_statistics->Collect(device, *pipeline);
+            }
+        } catch (const std::exception& exception) {
+            // vk::Exception derives from std::exception, so this also covers a
+            // driver rejecting the descriptor layout or update template.
+            LOG_ERROR(Render_Vulkan, "Failed to build compute pipeline {:016X}: {}", shader_hash,
+                      exception.what());
         }
-        std::scoped_lock lock{build_mutex};
-        is_built = true;
-        build_condvar.notify_one();
-        if (shader_notify) {
-            shader_notify->MarkShaderComplete();
-        }
+        publish();
     }};
     if (thread_worker) {
         thread_worker->QueueWork(std::move(func));

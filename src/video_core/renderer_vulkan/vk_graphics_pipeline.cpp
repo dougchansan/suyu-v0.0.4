@@ -272,32 +272,51 @@ GraphicsPipeline::GraphicsPipeline(
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     auto func{[this, shader_notify, &render_pass_cache, &descriptor_pool, pipeline_statistics] {
-        DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
-        uses_push_descriptor = builder.CanUsePushDescriptor();
-        descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
+        // Publish the build result on every exit path. Anything that escapes
+        // this lambda used to leave is_built false forever, and ConfigureDraw
+        // waits on it from the scheduler thread with no timeout, so a single
+        // rejected pipeline deadlocked the whole renderer instead of dropping
+        // one draw. MoltenVK rejects pipelines desktop drivers accept, which
+        // is why this surfaces on Apple first.
+        const auto publish{[this, shader_notify] {
+            {
+                std::scoped_lock lock{build_mutex};
+                is_built = true;
+            }
+            build_condvar.notify_all();
+            if (shader_notify) {
+                shader_notify->MarkShaderComplete();
+            }
+        }};
+        try {
+            DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
+            uses_push_descriptor = builder.CanUsePushDescriptor();
+            descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
 
-        if (!uses_push_descriptor) {
-            descriptor_allocator = descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, stage_infos);
+            if (!uses_push_descriptor) {
+                descriptor_allocator =
+                    descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, stage_infos);
+            }
+
+            const VkDescriptorSetLayout set_layout{*descriptor_set_layout};
+            pipeline_layout = builder.CreatePipelineLayout(set_layout);
+            descriptor_update_template =
+                builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
+
+            const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state))};
+            Validate();
+            MakePipeline(render_pass);
+            if (pipeline_statistics) {
+                pipeline_statistics->Collect(device, *pipeline);
+            }
+        } catch (const std::exception& exception) {
+            // vk::Exception derives from std::exception, so this also covers a
+            // driver rejecting the pipeline.
+            LOG_ERROR(Render_Vulkan, "Failed to build graphics pipeline {:016x}: {}", key.Hash(),
+                      exception.what());
+            build_failed = true;
         }
-
-        const VkDescriptorSetLayout set_layout{*descriptor_set_layout};
-        pipeline_layout = builder.CreatePipelineLayout(set_layout);
-        descriptor_update_template =
-            builder.CreateTemplate(set_layout, *pipeline_layout, uses_push_descriptor);
-
-        const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state))};
-        Validate();
-        MakePipeline(render_pass);
-        if (pipeline_statistics) {
-            pipeline_statistics->Collect(device, *pipeline);
-        }
-
-        std::scoped_lock lock{build_mutex};
-        is_built = true;
-        build_condvar.notify_one();
-        if (shader_notify) {
-            shader_notify->MarkShaderComplete();
-        }
+        publish();
     }};
     if (worker_thread) {
         worker_thread->QueueWork(std::move(func));
@@ -519,20 +538,22 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
     texture_cache.UpdateRenderTargets(false);
     texture_cache.CheckFeedbackLoop(std::span<const VideoCommon::ImageViewInOut>{views.data(),
                                                                                  views.size()});
-    ConfigureDraw(rescaling, render_area);
-
-    return true;
+    return ConfigureDraw(rescaling, render_area);
 }
 
-void GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
+bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
     if (!is_built.load(std::memory_order::relaxed)) {
-        // Wait for the pipeline to be built
-        scheduler.Record([this](vk::CommandBuffer) {
-            std::unique_lock lock{build_mutex};
-            build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
-        });
+        // Wait here rather than from a recorded command. The recorded wait ran
+        // on the scheduler thread after this draw had already been queued, so
+        // it could never decline to draw when the build failed.
+        std::unique_lock lock{build_mutex};
+        build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+    }
+    if (build_failed.load(std::memory_order::relaxed)) {
+        // No pipeline to bind. Drop the draw instead of binding a null handle.
+        return false;
     }
     const bool is_rescaling{texture_cache.IsRescaling()};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling)};
@@ -582,6 +603,7 @@ void GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                       descriptor_set, nullptr);
         }
     });
+    return true;
 }
 
 void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {

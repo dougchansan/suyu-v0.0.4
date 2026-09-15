@@ -132,7 +132,7 @@ private:
     template <typename Spec>
     bool ConfigureImpl(bool is_indexed);
 
-    void ConfigureDraw(const RescalingPushConstant& rescaling,
+    bool ConfigureDraw(const RescalingPushConstant& rescaling,
                        const RenderAreaPushConstant& render_are);
 
     void MakePipeline(VkRenderPass render_pass);
@@ -173,6 +173,9 @@ private:
     std::condition_variable build_condvar;
     std::mutex build_mutex;
     std::atomic_bool is_built{false};
+    // Set when the worker could not produce a pipeline. is_built still becomes
+    // true so nobody waits forever; draws using this pipeline are dropped.
+    std::atomic_bool build_failed{false};
     bool uses_push_descriptor{false};
 };
 
