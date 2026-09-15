@@ -12,10 +12,14 @@ STUB = r'''
 #include <cassert>
 #include <climits>
 #include <cstdint>
+#include <ranges>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 using u32=std::uint32_t; using Id=u32;
+// The production file takes static_vector from boost; capacity is irrelevant here.
+namespace boost::container { template<class T,std::size_t N> using static_vector=std::vector<T>; }
 namespace spv {
 enum class Decoration { ArrayStride, Block, Offset, Binding, DescriptorSet };
 enum class StorageClass { Uniform };
@@ -25,6 +29,7 @@ namespace fmt { inline std::string format(std::string_view,u32) { return {}; } }
 struct UniformDefinitions { Id field{}; };
 struct ConstantBufferDescriptor { u32 index,count; };
 struct Info {
+ static constexpr size_t MAX_CBUFS{18};
  std::vector<ConstantBufferDescriptor> constant_buffer_descriptors;
  std::array<u32,18> constant_buffer_used_sizes{};
  bool uses_global_memory{};
@@ -59,14 +64,35 @@ int main() {
   info.constant_buffer_used_sizes[5]=65536;
   EmitContext ctx;
   DefineConstBuffers(ctx,info,&UniformDefinitions::field,0,1,'u',width);
+  // Three distinct lengths, so three array types, each declared once.
   assert((ctx.lengths==std::vector<u32>{256/width,65536/width,1}));
   assert(ctx.interfaces.size()==3);
   assert(ctx.cbufs[3].field && ctx.cbufs[5].field && ctx.cbufs[7].field);
-  // Match the existing GLSL/MSL fallback for unresolved global memory access.
+  // Every buffer still gets its own variable.
+  assert(ctx.cbufs[3].field!=ctx.cbufs[5].field);
+  assert(ctx.cbufs[5].field!=ctx.cbufs[7].field);
+
+  // Equal lengths must collapse to ONE array type. SPIR-V deduplicates types,
+  // so emitting the declaration per descriptor would decorate the same id with
+  // ArrayStride/Block/Offset repeatedly, which spirv-val rejects with
+  // "decorated with ArrayStride multiple times".
   info.uses_global_memory=true;
   EmitContext global;
   DefineConstBuffers(global,info,&UniformDefinitions::field,0,1,'u',width);
-  assert((global.lengths==std::vector<u32>{65536/width,65536/width,65536/width}));
+  assert((global.lengths==std::vector<u32>{65536/width}));
+  assert(global.interfaces.size()==3);
+
+  // Same again without the global-memory fallback: two buffers of equal
+  // recorded size share one declaration, a third distinct size adds one.
+  Info shared;
+  shared.constant_buffer_descriptors={{0,1},{1,1},{2,1}};
+  shared.constant_buffer_used_sizes[0]=512;
+  shared.constant_buffer_used_sizes[1]=512;
+  shared.constant_buffer_used_sizes[2]=1024;
+  EmitContext dedup;
+  DefineConstBuffers(dedup,shared,&UniformDefinitions::field,0,1,'u',width);
+  assert((dedup.lengths==std::vector<u32>{512/width,1024/width}));
+  assert(dedup.interfaces.size()==3);
  }
 }
 '''
