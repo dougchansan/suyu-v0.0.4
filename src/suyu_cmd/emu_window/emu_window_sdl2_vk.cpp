@@ -38,6 +38,12 @@ EmuWindow_SDL2_VK::EmuWindow_SDL2_VK(InputCommon::InputSubsystem* input_subsyste
     const std::string window_title = fmt::format("suyu {} | {}-{} (Vulkan)", Common::g_build_name,
                                                  Common::g_scm_branch, Common::g_scm_desc);
 #endif
+    // A binary launched outside an .app bundle is treated as a background
+    // application on macOS, so its window opens behind whatever has focus and the
+    // compositor throttles it. Asking for foreground treatment before the window
+    // exists is what makes the later raise take effect.
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP, "0");
+
     render_window =
         SDL_CreateWindow(window_title.c_str(),
                          Layout::ScreenUndocked::Width, Layout::ScreenUndocked::Height,
@@ -106,6 +112,11 @@ EmuWindow_SDL2_VK::EmuWindow_SDL2_VK(InputCommon::InputSubsystem* input_subsyste
     (void)props;
 
     SDL_ShowWindow(render_window);
+    // Showing a window does not focus it. Without this the window sits behind the
+    // launching terminal, and on macOS a non-frontmost window has its CAMetalLayer
+    // throttled, which looks like an emulator performance problem rather than a
+    // window management one.
+    SDL_RaiseWindow(render_window);
     OnResize();
     OnMinimalClientAreaChangeRequest(GetActiveConfig().min_client_area_size);
     SDL_PumpEvents();
