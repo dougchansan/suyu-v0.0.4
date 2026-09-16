@@ -270,40 +270,20 @@ void Name(EmitContext& ctx, Id object, std::string_view format_str, Args&&... ar
 
 void DefineConstBuffers(EmitContext& ctx, const Info& info, Id UniformDefinitions::*member_type,
                         u32 binding, Id type, char type_char, u32 element_size) {
+    const Id array_type{ctx.TypeArray(type, ctx.Const(65536U / element_size))};
+    ctx.Decorate(array_type, spv::Decoration::ArrayStride, element_size);
+
+    const Id struct_type{ctx.TypeStruct(array_type)};
+    Name(ctx, struct_type, "{}_cbuf_block_{}{}", ctx.stage, type_char, element_size * CHAR_BIT);
+    ctx.Decorate(struct_type, spv::Decoration::Block);
+    ctx.MemberName(struct_type, 0, "data");
+    ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
+
+    const Id struct_pointer_type{ctx.TypePointer(spv::StorageClass::Uniform, struct_type)};
     const Id uniform_type{ctx.TypePointer(spv::StorageClass::Uniform, type)};
     ctx.uniform_types.*member_type = uniform_type;
 
-    // Types are deduplicated, so two buffers of the same length share one array
-    // and one struct id. Decorating per descriptor would then apply ArrayStride,
-    // Block and Offset to the same id more than once, which spirv-val rejects.
-    // Build each distinct length once and reuse its pointer type.
-    boost::container::static_vector<std::pair<u32, Id>, Info::MAX_CBUFS> block_types;
-    const auto block_pointer_type{[&](u32 elements) {
-        const auto it{std::ranges::find(block_types, elements, &std::pair<u32, Id>::first)};
-        if (it != block_types.end()) {
-            return it->second;
-        }
-        const Id array_type{ctx.TypeArray(type, ctx.Const(elements))};
-        ctx.Decorate(array_type, spv::Decoration::ArrayStride, element_size);
-        const Id struct_type{ctx.TypeStruct(array_type)};
-        Name(ctx, struct_type, "{}_cbuf_block_{}{}", ctx.stage, type_char, element_size * CHAR_BIT);
-        ctx.Decorate(struct_type, spv::Decoration::Block);
-        ctx.MemberName(struct_type, 0, "data");
-        ctx.MemberDecorate(struct_type, 0, spv::Decoration::Offset, 0U);
-        const Id pointer_type{ctx.TypePointer(spv::StorageClass::Uniform, struct_type)};
-        block_types.emplace_back(elements, pointer_type);
-        return pointer_type;
-    }};
-
     for (const ConstantBufferDescriptor& desc : info.constant_buffer_descriptors) {
-        // The upload/cache binding covers the recorded usage, not an unconditional
-        // 64 KiB. Metal validates the entire declared argument at its buffer offset.
-        // Dynamic offsets already record 64 KiB; unresolved global-memory access
-        // keeps the same full-size fallback as the GLSL and MSL backends.
-        const u32 used_size = info.uses_global_memory ? 65536U
-                                                    : info.constant_buffer_used_sizes[desc.index];
-        const u32 elements = (std::max)(1U, Common::DivCeil(used_size, element_size));
-        const Id struct_pointer_type{block_pointer_type(elements)};
         const Id id{ctx.AddGlobalVariable(struct_pointer_type, spv::StorageClass::Uniform)};
         ctx.Decorate(id, spv::Decoration::Binding, binding);
         ctx.Decorate(id, spv::Decoration::DescriptorSet, 0U);
