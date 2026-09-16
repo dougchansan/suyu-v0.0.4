@@ -4,6 +4,7 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <climits>
@@ -416,12 +417,89 @@ void SetColorConsoleBackendEnabled(bool enabled) {
         logging_instance->color_console_backend.enabled = enabled;
 }
 
+namespace {
+
+/// One call site that has been logging. Identified by the filename pointer and the line
+/// number, both compile-time constants, so matching a site is a pointer compare rather
+/// than hashing a string on every message.
+struct ThrottleSite {
+    std::atomic<const char*> file{nullptr};
+    std::atomic<unsigned int> line{0};
+    std::atomic<u64> window_start_ns{0};
+    std::atomic<u64> emitted{0};
+    std::atomic<u64> suppressed{0};
+};
+
+/// Decide whether a message should be formatted and written.
+///
+/// A guest that gets into a bad state logs the same line as fast as it can run: an
+/// unmapped read inside a tight loop will produce millions a minute. Writing happens on
+/// the calling thread, so each one costs a vformat and a write there, and they bury
+/// whatever message would have explained the problem. Allow a burst from each site per
+/// window, drop the rest, and report how many were dropped on the next one that gets
+/// through, so the log still says what happened without carrying every instance.
+///
+/// Counters are relaxed atomics. Threads logging the same site can race and miscount by
+/// a few either way, which is not worth a lock on this path.
+bool AdmitLogMessage(const char* filename, unsigned int line_num, u64& out_suppressed) {
+    constexpr size_t BucketCount = 256;
+    constexpr u64 BurstPerWindow = 32;
+    constexpr u64 WindowNs = 5'000'000'000ULL;
+
+    static std::array<ThrottleSite, BucketCount> sites{};
+
+    out_suppressed = 0;
+
+    const auto mixed = (reinterpret_cast<uintptr_t>(filename) >> 4) ^
+                       (static_cast<uintptr_t>(line_num) * 2654435761ULL);
+    ThrottleSite& site = sites[mixed % BucketCount];
+
+    const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch())
+                                         .count());
+
+    // Two sites sharing a bucket throttle each other. That costs a few extra messages in
+    // exchange for a fixed-size table and no allocation on the logging path.
+    if (site.file.load(std::memory_order_relaxed) != filename ||
+        site.line.load(std::memory_order_relaxed) != line_num) {
+        site.file.store(filename, std::memory_order_relaxed);
+        site.line.store(line_num, std::memory_order_relaxed);
+        site.window_start_ns.store(now, std::memory_order_relaxed);
+        site.emitted.store(1, std::memory_order_relaxed);
+        site.suppressed.store(0, std::memory_order_relaxed);
+        return true;
+    }
+
+    if (now - site.window_start_ns.load(std::memory_order_relaxed) > WindowNs) {
+        out_suppressed = site.suppressed.exchange(0, std::memory_order_relaxed);
+        site.window_start_ns.store(now, std::memory_order_relaxed);
+        site.emitted.store(1, std::memory_order_relaxed);
+        return true;
+    }
+
+    if (site.emitted.fetch_add(1, std::memory_order_relaxed) < BurstPerWindow) {
+        return true;
+    }
+
+    site.suppressed.fetch_add(1, std::memory_order_relaxed);
+    return false;
+}
+
+} // namespace
+
 void FmtLogMessageImpl(Class log_class, Level log_level, const char* filename, unsigned int line_num, const char* function, fmt::string_view format, const fmt::format_args& args) {
     if (logging_instance && logging_instance->filter.CheckMessage(log_class, log_level)) {
+        u64 suppressed{};
+        if (!AdmitLogMessage(filename, line_num, suppressed)) {
+            return;
+        }
         auto const flush = ::Settings::values.log_flush_line.GetValue();
         logging_instance->ForEachBackend([=](Backend& backend) {
             backend.Write(Entry{
-                .message = fmt::vformat(format, args),
+                .message = suppressed == 0
+                               ? fmt::vformat(format, args)
+                               : fmt::format("[{} repeats suppressed] {}", suppressed,
+                                             fmt::vformat(format, args)),
                 .timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - logging_instance->time_origin),
                 .log_class = log_class,
                 .log_level = log_level,
