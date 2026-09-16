@@ -251,6 +251,14 @@ Shader::RuntimeInfo MakeRuntimeInfo(std::span<const Shader::IR::Program> program
         if (device.IsMoltenVK()) {
             for (size_t i = 0; i < 8; ++i) {
                 const auto format = static_cast<Tegra::RenderTargetFormat>(key.state.color_formats[i]);
+                // Most draws bind fewer than eight attachments, leaving the rest NONE.
+                // Converting NONE is not a format question with a wrong answer, it is a
+                // slot that is not there, and asking anyway trips an assert on every
+                // pipeline built. Float is what the unused slots already default to.
+                if (format == Tegra::RenderTargetFormat::NONE) {
+                    info.color_output_types[i] = Shader::AttributeType::Float;
+                    continue;
+                }
                 const auto pixel_format = VideoCore::Surface::PixelFormatFromRenderTargetFormat(format);
                 if (VideoCore::Surface::IsPixelFormatInteger(pixel_format)) {
                     if (VideoCore::Surface::IsPixelFormatSignedInteger(pixel_format)) {
