@@ -122,6 +122,11 @@ static void PrintHelp(const char* argv0) {
                  "                      starting at the first displayed frame and exiting\n"
                  "                      when the script runs out\n"
                  "-u, --user            Select a specific user profile from 0 to 7\n"
+                 "-V, --app-version=<n>[:<display>]\n"
+                 "                      Report <n> as the application version and <display>\n"
+                 "                      as its version string, for content that carries no\n"
+                 "                      control data of its own. Without this a deconstructed\n"
+                 "                      ROM directory always reports 1.0.0.\n"
                  "-v, --version         Output version information and exit\n"
                  "-l, "
                  "--applet-params="
@@ -712,6 +717,8 @@ int main(int argc, char** argv) {
     bool use_multiplayer = false;
     bool fullscreen = false;
     bool tas_playback = false;
+    std::optional<u32> app_version_override;
+    std::string app_display_version_override;
     Service::AM::FrontendAppletParameters load_parameters{};
     std::string nickname{};
     std::string password{};
@@ -730,12 +737,13 @@ int main(int argc, char** argv) {
         {"tas", no_argument, 0, 't'},
         {"user", required_argument, 0, 'u'},
         {"version", no_argument, 0, 'v'},
+        {"app-version", required_argument, 0, 'V'},
         {0, 0, 0, 0},
         // clang-format on
     };
 
     while (optind < argc) {
-        int arg = getopt_long(argc, argv, "g:fhvp::c:u:l::t", long_options, &option_index);
+        int arg = getopt_long(argc, argv, "g:fhvp::c:u:l::tV:", long_options, &option_index);
         if (arg != -1) {
             switch (static_cast<char>(arg)) {
             case 'c':
@@ -820,6 +828,25 @@ int main(int argc, char** argv) {
             case 'v':
                 PrintVersion();
                 return 0;
+            case 'V': {
+                // <numeric>[:<display>]. The numeric part is what the guest sees through
+                // the application version, the display part is the string a title prints
+                // for itself.
+                const std::string str_arg(optarg);
+                const auto colon = str_arg.find(':');
+                const std::string numeric = str_arg.substr(0, colon);
+                try {
+                    app_version_override = static_cast<u32>(std::stoul(numeric));
+                } catch (const std::exception&) {
+                    std::cout << "Invalid --app-version: " << str_arg
+                              << " (expected <number>[:<display>])\n";
+                    return 0;
+                }
+                if (colon != std::string::npos) {
+                    app_display_version_override = str_arg.substr(colon + 1);
+                }
+                break;
+            }
             }
         } else {
 #ifdef _WIN32
@@ -1088,6 +1115,18 @@ int main(int argc, char** argv) {
     LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
     system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    if (app_version_override) {
+        // Deconstructed ROM directories carry no control data, so GetDisplayVersion has
+        // nothing to read and falls back to a hard-coded 1.0.0. Titles that report their
+        // own version, and anything that checks version compatibility, then see a value
+        // that does not match the code actually loaded.
+        LOG_INFO(Frontend, "suyu-cmd: reporting application version {} ({})",
+                 *app_version_override,
+                 app_display_version_override.empty() ? "no display version"
+                                                      : app_display_version_override);
+        system.SetApplicationVersionOverride(*app_version_override,
+                                             app_display_version_override);
+    }
     system.GetFileSystemController().CreateFactories(*system.GetFilesystem());
     system.GetUserChannel().clear();
 
