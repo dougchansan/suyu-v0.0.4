@@ -126,7 +126,9 @@ static void PrintHelp(const char* argv0) {
                  "                      Report <n> as the application version and <display>\n"
                  "                      as its version string, for content that carries no\n"
                  "                      control data of its own. Without this a deconstructed\n"
-                 "                      ROM directory always reports 1.0.0.\n"
+                 "                      ROM directory always reports 1.0.0. Persisted as\n"
+                 "                      application_version_override and\n"
+                 "                      application_display_version_override in the config.\n"
                  "-v, --version         Output version information and exit\n"
                  "-l, "
                  "--applet-params="
@@ -1115,6 +1117,20 @@ int main(int argc, char** argv) {
     LOG_INFO(Frontend, "suyu-cmd: Window created, loading game...");
     system.SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>());
     system.SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());
+    // The command line wins over the configuration file, so a one-off run can differ
+    // from the persisted setting without editing it.
+    if (!app_version_override) {
+        const u32 configured = Settings::values.application_version_override.GetValue();
+        const std::string& configured_display =
+            Settings::values.application_display_version_override.GetValue();
+        if (configured != 0 || !configured_display.empty()) {
+            app_version_override = configured;
+            if (app_display_version_override.empty()) {
+                app_display_version_override = configured_display;
+            }
+        }
+    }
+
     if (app_version_override) {
         // Deconstructed ROM directories carry no control data, so GetDisplayVersion has
         // nothing to read and falls back to a hard-coded 1.0.0. Titles that report their
