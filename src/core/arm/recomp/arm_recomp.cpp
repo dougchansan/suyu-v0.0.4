@@ -99,7 +99,24 @@ struct RecompHostMem {
     u64 page_bits;
     u64 pointer_mask;
     u64 address_space_max;
+    // Points at g_guard_generation. Generated blocks re-verify their bytes only
+    // when this moves, rather than on every entry. Shared by all cores, so it is
+    // a pointer: one core invalidating code has to be visible to blocks running
+    // on the others.
+    const u64* guard_generation;
 };
+
+// Bumped whenever guest code may have changed - IC IVAU, a cache-range
+// invalidation, a full icache flush, or a new page table. Generated code reads
+// it through the pointer above, so it must be a plain 64-bit object in memory.
+static std::atomic<u64> g_guard_generation{0};
+static_assert(std::atomic<u64>::is_always_lock_free);
+static_assert(sizeof(std::atomic<u64>) == sizeof(u64));
+
+/// Force every compiled block to re-verify its bytes before it next runs.
+static void BumpGuardGeneration() {
+    g_guard_generation.fetch_add(1, std::memory_order_release);
+}
 
 // This struct is duplicated by hand in the emitter (arm64_to_c.h, RuntimeH's
 // RecompHostMem) because the generated project is plain C and shares no headers
@@ -118,7 +135,8 @@ static_assert(offsetof(RecompHostMem, page_entry_stride) == 80);
 static_assert(offsetof(RecompHostMem, page_bits) == 88);
 static_assert(offsetof(RecompHostMem, pointer_mask) == 96);
 static_assert(offsetof(RecompHostMem, address_space_max) == 104);
-static_assert(sizeof(RecompHostMem) == 112);
+static_assert(offsetof(RecompHostMem, guard_generation) == 112);
+static_assert(sizeof(RecompHostMem) == 120);
 
 // Nothing links these two builds together, so the shared layout is pinned on
 // both sides: the generated runtime asserts the same four offsets against its
@@ -533,6 +551,7 @@ struct ArmRecomp::Impl {
         // Filled in by RefreshPageTable once a process exists; until then the
         // fields stay null and every access takes the callback path.
         bridge.page_entries = nullptr;
+        bridge.guard_generation = reinterpret_cast<const u64*>(&g_guard_generation);
         ctx.host_mem = &bridge;
     }
 
@@ -625,6 +644,11 @@ struct ArmRecomp::Impl {
     /// space, so it is refreshed rather than cached forever.
     void RefreshPageTable() {
         const auto view = system.ApplicationMemory().GetPageTableView();
+        // A different table can mean different bytes behind the same guest
+        // address, so nothing verified against the old one still counts.
+        if (bridge.page_entries != view.entries) {
+            BumpGuardGeneration();
+        }
         bridge.page_entries = view.entries;
         bridge.page_entry_stride = view.entry_stride;
         bridge.page_bits = view.page_bits;
@@ -1033,6 +1057,9 @@ struct ArmRecomp::Impl {
     // path only ever calls the virtual methods, and holding the concrete type
     // here is what forced the library into a build that never runs a JIT.
     ExclusiveMonitor* exclusive_monitor{};
+    // Last guest thread run on this core, so a reservation is voided on a real
+    // context switch and left alone on an ordinary return to the host.
+    Kernel::KThread* last_thread{};
     std::size_t core_index{};
     bool uses_wall_clock{};
 #ifndef SUYU_NO_JIT
@@ -1174,6 +1201,20 @@ HaltReason ArmRecomp::RunFallback(Kernel::KThread* thread) {
 }
 
 HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
+    // A context switch voids any outstanding reservation. A thread preempted
+    // between its LDXR and STXR would otherwise have the STXR succeed against a
+    // word another thread changed on this core meanwhile, silently losing an
+    // update to a mutex or condition variable and deadlocking the guest.
+    //
+    // Only on an actual switch: this backend returns to the host constantly
+    // (chain budget, SVCs), so clearing on every entry would void reservations
+    // the same thread is still in the middle of.
+    if (impl->last_thread != thread) {
+        impl->last_thread = thread;
+        if (impl->exclusive_monitor) {
+            impl->exclusive_monitor->ClearExclusive(impl->core_index);
+        }
+    }
     // Logged once so it is obvious from a log whether the backend was ever
     // entered at all. A run with no errors is otherwise indistinguishable from
     // a run where the guest thread was never scheduled onto it.
@@ -1451,6 +1492,11 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
             }
             const u64 address = impl->ctx.pending_svc;
             impl->ctx.pending_svc = kNoPendingSvc;
+            // The guest just synchronized new instructions, so nothing a block
+            // verified before this point can still be assumed. Bumped here as
+            // well as in InvalidateCacheRange so the guarantee does not depend
+            // on which engine GetArmInterface hands back.
+            BumpGuardGeneration();
             for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
                 if (auto* cpu = thread->GetOwnerProcess()->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
             }
@@ -1511,6 +1557,20 @@ HaltReason ArmRecomp::RunThread(Kernel::KThread* thread) {
 }
 
 HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
+    // A context switch voids any outstanding reservation. A thread preempted
+    // between its LDXR and STXR would otherwise have the STXR succeed against a
+    // word another thread changed on this core meanwhile, silently losing an
+    // update to a mutex or condition variable and deadlocking the guest.
+    //
+    // Only on an actual switch: this backend returns to the host constantly
+    // (chain budget, SVCs), so clearing on every entry would void reservations
+    // the same thread is still in the middle of.
+    if (impl->last_thread != thread) {
+        impl->last_thread = thread;
+        if (impl->exclusive_monitor) {
+            impl->exclusive_monitor->ClearExclusive(impl->core_index);
+        }
+    }
     // Block granularity is the finest this backend can step: recompiled blocks
     // are straight-line C with no per-instruction re-entry point.
     if (!impl->lookup) {
@@ -1531,6 +1591,7 @@ HaltReason ArmRecomp::StepThread(Kernel::KThread* thread) {
         }
         const u64 address = impl->ctx.pending_svc;
         impl->ctx.pending_svc = kNoPendingSvc;
+        BumpGuardGeneration();
         for (size_t core = 0; core < Hardware::NUM_CPU_CORES; ++core) {
             if (auto* cpu = thread->GetOwnerProcess()->GetArmInterface(core)) cpu->InvalidateCacheRange(address, 64);
         }
@@ -1556,13 +1617,23 @@ void ArmRecomp::ClearInstructionCache() {
 #ifndef SUYU_NO_JIT
     if (impl->fallback) impl->fallback->ClearInstructionCache();
 #endif
-    // Compiled blocks validate their bytes on every entry, including chains.
+    // A whole-icache flush is the broadest statement that guest code may have
+    // changed, so it retires every block's cached verification. Blocks used to
+    // re-read their bytes on every entry, which made this a no-op for them.
+    BumpGuardGeneration();
 }
 
 void ArmRecomp::InvalidateCacheRange(u64 addr, std::size_t size) {
 #ifndef SUYU_NO_JIT
     if (impl->fallback) impl->fallback->InvalidateCacheRange(addr, size);
 #endif
+    // Whoever called this is telling us the bytes behind some guest address may
+    // have changed. Blocks cache the generation they last verified at, so moving
+    // it is what makes them look again. Deliberately global rather than ranged:
+    // the counter is read once per block entry, and narrowing it to the affected
+    // range would cost a lookup on the hot path to save re-verifying blocks in a
+    // situation that is rare to begin with.
+    BumpGuardGeneration();
 }
 
 void ArmRecomp::GetContext(Kernel::Svc::ThreadContext& ctx) const {
