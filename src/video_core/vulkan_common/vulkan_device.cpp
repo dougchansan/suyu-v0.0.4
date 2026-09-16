@@ -762,10 +762,15 @@ VkFormat Device::GetSupportedFormat(VkFormat wanted_format, VkFormatFeatureFlags
     // The wanted format is not supported by hardware, search for alternatives
     const VkFormat* alternatives = GetFormatAlternatives(wanted_format);
     if (alternatives == nullptr) {
+        // Diagnostic: report which feature bits are actually missing, so the
+        // gap can be named instead of guessed at.
+        const auto it = format_properties.find(wanted_format);
+        const VkFormatFeatureFlags have =
+            it == format_properties.end() ? 0 : GetFormatFeatures(it->second, format_type);
         LOG_ERROR(Render_Vulkan,
                   "Format={} with usage={} and type={} has no defined alternatives and host "
-                  "hardware does not support it",
-                  wanted_format, wanted_usage, format_type);
+                  "hardware does not support it (have=0x{:x} missing=0x{:x})",
+                  wanted_format, wanted_usage, format_type, have, wanted_usage & ~have);
         return wanted_format;
     }
 
