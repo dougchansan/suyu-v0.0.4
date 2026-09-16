@@ -315,7 +315,18 @@ FormatInfo SurfaceFormat(const Device& device, FormatType format_type, bool with
         }
         break;
     }
-    return {device.GetSupportedFormat(tuple.format, usage, format_type), attachable, storage};
+    const VkFormat supported_format{device.GetSupportedFormat(tuple.format, usage, format_type)};
+    // The table's storage flag describes the guest format, not what the host can
+    // do with it, and GetSupportedFormat hands the format back unchanged when it
+    // has no alternative to offer. Reporting storage anyway makes ImageUsageFlags
+    // ask for VK_IMAGE_USAGE_STORAGE_BIT on an image whose format does not
+    // support it. Metal has no storage access for the 10-bit packed formats, so
+    // on MoltenVK that describes most of what a frame draws. Re-check against the
+    // format actually chosen.
+    const bool supported_storage{
+        storage && device.IsFormatSupported(supported_format, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT,
+                                            format_type)};
+    return {supported_format, attachable, supported_storage};
 }
 
 VkShaderStageFlagBits ShaderStage(Shader::Stage stage) {
