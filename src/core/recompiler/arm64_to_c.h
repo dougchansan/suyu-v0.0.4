@@ -430,8 +430,57 @@ inline std::string Xsp(u32 r) {
 // Emit one baseline S/D addition/subtraction from raw uint64_t _a/_b to _v.
 // Three guard bits plus sticky alignment preserve exact rounding, including
 // cancellation. No host FP arithmetic or host FP state is involved.
+/// Emit a native host-FP fast path in front of a soft-float value body.
+///
+/// The guest is AArch64 and, on iOS, so is the host. With FPCR in its default
+/// configuration the host FPU is bit-identical to the guest for these
+/// operations: same IEEE-754 rounding, same signed zeros, and - because both
+/// are ARM - the same NaN propagation order. The soft-float body spends
+/// hundreds of integer operations per lane on work one FMLA does natively,
+/// which the device profile showed to be the single largest cost in the frame.
+///
+/// The fast path is refused whenever the guest has selected a non-default
+/// rounding mode, flush-to-zero, default-NaN, alternative half precision, or
+/// enabled any exception trap - every FPCR bit that would make the host
+/// disagree. In those cases the soft-float body runs exactly as before.
+///
+/// It is restricted to AArch64 hosts on purpose. On x86-64 the NaN chosen by a
+/// multiply-add differs from ARM's order, so a native path there would change
+/// results relative to the desktop reference export. Keeping it ARM-only means
+/// the exported module stays bit-identical on the machine it was verified on.
+///
+/// Known limitation: FPSR exception flags are not raised on this path. They are
+/// sticky status bits, so a guest that reads FPSR after arithmetic that only
+/// took the fast path sees them clear. Define RECOMP_NO_NATIVE_FP to compile
+/// the generated module with the soft-float path only, which restores flag
+/// behaviour exactly.
+///
+/// `op` is one of "add", "sub", "div" or "fma"; "fma" reads the addend from _z.
+inline std::string EmitFPNativeValue(bool dbl, const char* op) {
+    const std::string ft = dbl ? "double" : "float";
+    const std::string it = dbl ? "uint64_t" : "uint32_t";
+    const std::string fma = dbl ? "__builtin_fma" : "__builtin_fmaf";
+    const std::string sz = dbl ? "8" : "4";
+    std::string expr;
+    if (!std::strcmp(op, "add")) expr = "_na+_nb";
+    else if (!std::strcmp(op, "sub")) expr = "_na-_nb";
+    else if (!std::strcmp(op, "div")) expr = "_na/_nb";
+    else expr = fma + "(_na,_nb,_nz)";
+    std::string s =
+        "\n#if defined(__aarch64__) && !defined(RECOMP_NO_NATIVE_FP)\n"
+        "if(!(c->fpcr&0x07C8FF07ULL)){" + ft + " _na,_nb,_nr;" + it + " _nt;"
+        "_nt=(" + it + ")_a;memcpy(&_na,&_nt," + sz + ");"
+        "_nt=(" + it + ")_b;memcpy(&_nb,&_nt," + sz + ");";
+    if (!std::strcmp(op, "fma"))
+        s += ft + " _nz;_nt=(" + it + ")_z;memcpy(&_nz,&_nt," + sz + ");";
+    s += "_nr=" + expr + ";memcpy(&_nt,&_nr," + sz + ");_v=(uint64_t)_nt;} else\n"
+         "#endif\n";
+    return s;
+}
+
 inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
-    return "{ const unsigned _f=" + std::string(dbl?"52":"23") +
+    return EmitFPNativeValue(dbl, subtract ? "sub" : "add") +
+        "{ const unsigned _f=" + std::string(dbl?"52":"23") +
         ";const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1,_exp="+
         (dbl?"0x7ff0000000000000ULL":"0x7f800000ULL")+",_sign="+
         (dbl?"0x8000000000000000ULL":"0x80000000ULL")+";"
@@ -472,7 +521,8 @@ inline std::string EmitFPAddSubValue(bool dbl, bool subtract) {
 // IEEE bit patterns. A multiply supplies a same-sign zero addend so its zero
 // result has the product sign in every rounding mode.
 inline std::string EmitFPDivideValue(bool dbl) {
-    return "{ const unsigned _f="+std::string(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+R"C(;
+    return EmitFPNativeValue(dbl, "div") +
+        "{ const unsigned _f="+std::string(dbl?"52":"23")+",_bias="+(dbl?"1023":"127")+R"C(;
 const uint64_t _hidden=1ULL<<_f,_frac=_hidden-1,_quiet=_hidden>>1;
 const uint64_t _exp=((uint64_t)(2*_bias+1))<<_f,_sign=1ULL<<(_f+(_f==52?11:8));
 const unsigned _mode=(unsigned)(c->fpcr>>22)&3;unsigned _negative=!!((_a^_b)&_sign);
@@ -582,7 +632,8 @@ else {
 }
 
 inline std::string EmitFPMulAddValue(bool dbl) {
-    std::string s="{ const unsigned _f="+std::string(dbl?"52":"23")+
+    std::string s=EmitFPNativeValue(dbl, "fma")+
+        "{ const unsigned _f="+std::string(dbl?"52":"23")+
         ",_bias="+(dbl?"1023":"127")+",_count="+(dbl?"67":"9")+
         "; const int _base="+(dbl?"-2148":"-298")+"; uint64_t _p["+
         (dbl?"67":"9")+"]={0},_c["+(dbl?"67":"9")+"]={0};";
@@ -5174,8 +5225,28 @@ inline RecompileStats EmitProject(const std::string& mod, const u8* text, size_t
         for (u32 k = 0; k < b.count; ++k) {
             char word[32]; snprintf(word, sizeof word, "0x%08xU,", p[first + k]); rcu += word;
         }
-        rcu += "};\n    recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
-               "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n";
+        // Verify on the first entry, and after that only when the host says
+        // guest code may have changed. Checking the bytes on every entry made
+        // the guard the largest single cost in the frame: it ran before any
+        // guest work, and cost either a callback per instruction or a memcmp of
+        // the whole block. Comparing one counter replaces both.
+        //
+        // This keeps the guarantee the guard actually claims - synchronized
+        // instruction fetch - because on AArch64 the guest cannot synchronize
+        // new code without IC IVAU, and the host bumps the generation there, on
+        // any cache-range invalidation, on a full icache flush, and on every
+        // page-table refresh. What it does not do, and never did, is catch
+        // another thread rewriting a block while that block executes.
+        rcu += "};\n"
+               "    static uint64_t _guard_seen=0;\n"
+               "    { /* +1 so a fresh block never matches generation zero. */\n"
+               "      const uint64_t _gen=(c->host_mem&&c->host_mem->guard_generation)\n"
+               "          ? *c->host_mem->guard_generation+1 : 1;\n"
+               "      if(_guard_seen!=_gen){\n"
+               "        recomp_code_guard(c,g_module_base+" + std::to_string(b.vaddr) +
+               "ULL,_expected," + std::to_string(b.count) + "U,g_recomp_guard_host_v2);\n"
+               "        _guard_seen=_gen;\n"
+               "      } }\n";
         // Lookup indexes every emitted instruction, not only block starts. An
         // indirect transfer can therefore enter the middle of this function.
         // Direct chains publish their exact target PC before calling, so any
@@ -5802,6 +5873,20 @@ typedef struct RecompHostMem {
     uint64_t page_bits;
     uint64_t pointer_mask;
     uint64_t address_space_max;
+    /* Generation counter for the code guard, owned by the host and shared by
+       every core. The host bumps it whenever guest code may have changed: an
+       IC IVAU, a cache-range invalidation from another engine, a full icache
+       flush, or a new page table. A block re-verifies its bytes only when this
+       has moved since that block last checked, instead of on every entry.
+
+       A pointer rather than a value because each core owns its own
+       RecompHostMem, and one core invalidating code has to be seen by blocks
+       running on all of them.
+
+       Null is allowed and means "no host generation", which makes every block
+       verify exactly once - the standalone runtime's situation, where nothing
+       can remap or rewrite guest code behind the generated image. */
+    const uint64_t* guard_generation;
 } RecompHostMem;
 
 typedef struct GuestContext {
@@ -6098,15 +6183,32 @@ static void memstore(GuestContext* c, uint64_t a, uint32_t sz, uint64_t v){
   { uint8_t* p=memptr(c,a,sz); if(p)memcpy(p,&v,sz); }
 }
 
+static unsigned char* recomp_host_ptr(GuestContext* c, uint64_t va);
+static int recomp_scalar_same_page(const RecompHostMem* hm, uint64_t a, uint64_t bytes);
+
 /* Every generated block checks its compilation input before any guest effect.
    This guards synchronized instruction fetch, not unsynchronized concurrent
-   mutation of an already executing block. Failure must never enter a JIT. */
+   mutation of an already executing block. Failure must never enter a JIT.
+
+   This runs on entry to every block, so the per-word loop below costs one
+   indirect host callback per guest instruction before any guest work happens -
+   the largest single cost in the profile. When the whole block lies inside one
+   mapped page with a real backing pointer, the identical comparison is one
+   memcmp, so take that. It is a faster spelling of the same check, not a weaker
+   one: the same words are compared, and every case the fast path cannot prove
+   safe (unmapped, debug or GPU-tracked memory, a page crossing, an address
+   outside the space, a mismatch) falls through to the loop, which is also what
+   produces the precise diagnostic naming the offending word. */
 void recomp_code_guard(GuestContext* c,uint64_t pc,const uint32_t* expected,uint32_t count,int host_guard_version){
   uint32_t k;
   if(c->host_mem && host_guard_version!=2){
     c->pc=pc;
     fprintf(stderr,"[recomp] code guard requires a guard-v2 host and guarded modules at 0x%llx\n",(unsigned long long)pc);
     fflush(stderr); abort();
+  }
+  if(c->host_mem && count && recomp_scalar_same_page(c->host_mem,pc,(uint64_t)count*4)){
+    const unsigned char* p=recomp_host_ptr(c,pc);
+    if(p && memcmp(p,expected,(size_t)count*4)==0) return;
   }
   for(k=0;k<count;++k){
     uint64_t va=pc+(uint64_t)k*4, actual=0;
