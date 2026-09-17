@@ -659,6 +659,12 @@ int main(int argc, char** argv) {
 #ifdef SUYU_CMD_STATIC_RECOMP
     {
         namespace FS = Common::FS;
+        // Captured before the portable overrides below take effect: keys
+        // belong to the user's installed suyu rather than to the export,
+        // so this is where they still are once the rest has been
+        // repointed into the export's own user directory.
+        const std::filesystem::path installed_keys =
+            FS::GetSuyuPath(FS::SuyuPath::KeysDir);
 #ifdef _WIN32
         wchar_t exe_w[MAX_PATH]{};
         GetModuleFileNameW(nullptr, exe_w, MAX_PATH);
@@ -696,7 +702,13 @@ int main(int argc, char** argv) {
         FS::SetSuyuPath(FS::SuyuPath::TASDir, user_root / "tas");
         FS::SetSuyuPath(FS::SuyuPath::IconsDir, user_root / "icons");
         FS::SetSuyuPath(FS::SuyuPath::ThemesDir, user_root / "themes");
+#ifdef _WIN32
         FS::SetSuyuPath(FS::SuyuPath::KeysDir, FS::GetAppDataRoamingDirectory() / "suyu" / "keys");
+#else
+        // No roaming-appdata equivalent here, and the default already
+        // points at the installed location on these platforms.
+        FS::SetSuyuPath(FS::SuyuPath::KeysDir, installed_keys);
+#endif
     }
 #endif
 
