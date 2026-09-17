@@ -114,6 +114,15 @@ if (SUYU_CMD OR YUZU_CMD)
                 endif()
                 add_subdirectory("${SUYU_CMD_RECOMP_DIR}/${_m}"
                                  "${CMAKE_CURRENT_BINARY_DIR}/recomp/${_m}")
+                # The generated CMakeLists renames each module's exported
+                # symbols so that several modules can share one binary, but
+                # its list predates these three and every module defines
+                # them, so linking more than one fails on duplicates.
+                # Rename them the same way until the emitter does.
+                target_compile_definitions(recomp_static_${_m} PRIVATE
+                    recomp_image_index=recomp_image_index_${_m}
+                    _recomp_index_view=_recomp_index_view_${_m}
+                    recomp_build_index=recomp_build_index_${_m})
                 list(APPEND _recomp_libs "recomp_static_${_m}")
             endif()
         endforeach()
