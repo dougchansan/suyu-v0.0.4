@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2016 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstdlib>
 #include <SDL3/SDL.h>
 // SDL3 removed these constants; define compat shims
 static constexpr Uint8 SDL_PRESSED = 1;
@@ -761,7 +762,16 @@ void EmuWindow_SDL2::WaitEvent() {
     }
 
     const u64 current_time = SDL_GetTicks();
-    if (current_time > last_time + 2000) {
+    // GetAndResetPerfStats clears the counters as it reads them, so only one
+    // caller in the process can have them. While the benchmark sampler is
+    // running it is that caller, and this refresh stands down rather than
+    // taking half the frames away from it and making both readings wrong.
+    // Nothing is lost by standing down: this runs from the SDL event
+    // handler, so during a headless replay - no input, nobody touching the
+    // window - it fires a couple of times in a whole run anyway.
+    static const bool perf_sampling_owns_stats =
+        std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
+    if (current_time > last_time + 2000 && !perf_sampling_owns_stats) {
         const auto results = system.GetAndResetPerfStats();
         std::string game_name;
         [[maybe_unused]] auto _ = system.GetGameName(game_name);

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 #include "common/string_util.h"
 #include "core/arm/recomp/arm_recomp.h"
 #include "core/core.h"
+#include "core/perf_stats.h"
 #include "core/core_timing.h"
 #include "core/cpu_manager.h"
 #include "core/crypto/key_manager.h"
@@ -1308,9 +1310,48 @@ int main(int argc, char** argv) {
     if (system.DebuggerEnabled()) {
         system.InitializeDebugger();
     }
+
+    // Periodic performance samples for benchmarking.
+    //
+    // Timing a replay end to end says little when a run can stall partway
+    // and still finish: the stall is averaged in invisibly, and a run that
+    // never finishes yields no number at all. A series lets a measurement
+    // pick a window, and a stall shows up in it as a gap.
+    //
+    // On a thread of its own because the loop below blocks in WaitEvent:
+    // samples driven from there would stop arriving exactly when the
+    // emulator stops making progress, which is the case worth seeing. The
+    // window-title refresh gives up the counters while this is enabled, so
+    // there is still only one reader of them.
+    const bool perf_sampling = std::getenv("SUYU_CMD_PERF_SAMPLE") != nullptr;
+    std::atomic<bool> perf_sampling_run{perf_sampling};
+    std::thread perf_sampler;
+    if (perf_sampling) {
+        perf_sampler = std::thread([&system, &perf_sampling_run] {
+            while (perf_sampling_run.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(std::chrono::seconds{1});
+                if (!perf_sampling_run.load(std::memory_order_relaxed)) {
+                    break;
+                }
+                const auto r = system.GetAndResetPerfStats();
+                LOG_INFO(Frontend,
+                         "PERF game_fps={:.3f} system_fps={:.3f} frametime_ms={:.3f} "
+                         "speed={:.4f}",
+                         r.average_game_fps, r.system_fps, r.frametime * 1000.0,
+                         r.emulation_speed);
+            }
+        });
+    }
+
     while (emu_window->IsOpen()) {
         emu_window->WaitEvent();
     }
+
+    perf_sampling_run.store(false, std::memory_order_relaxed);
+    if (perf_sampler.joinable()) {
+        perf_sampler.join();
+    }
+
     system.DetachDebugger();
     void(system.Pause());
     system.ShutdownMainProcess();
