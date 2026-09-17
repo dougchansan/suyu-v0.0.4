@@ -51,6 +51,23 @@ if (SUYU_CMD OR YUZU_CMD)
         # collide between modules) and their loadable shared image.
         set(RECOMP_STATIC_ONLY ON)
         set(_recomp_libs "")
+        # Generated block bodies re-declare temporaries per guest block and
+        # leave results unused wherever the original instruction's value is
+        # dead, so suyu's warnings-as-errors fire constantly on machine-written
+        # code that nobody is going to read, let alone edit. -Wshadow alone
+        # fails the build on Mario Kart 8 Deluxe's main module. The MSVC branch
+        # of the generated CMakeLists already silences its equivalents; do the
+        # same for everyone else by dropping -Werror for these subdirectories
+        # only. The host's own flags are restored once they have been added, so
+        # suyu's sources keep the full set.
+        get_directory_property(_recomp_host_opts COMPILE_OPTIONS)
+        set(_recomp_quiet_opts "${_recomp_host_opts}")
+        # Matched anywhere in the element, not anchored: these arrive wrapped
+        # in a generator expression, e.g.
+        # "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror=shadow>", so an anchored pattern
+        # matches none of them and silently leaves the build exactly as it was.
+        list(FILTER _recomp_quiet_opts EXCLUDE REGEX "-Werror|/WX")
+        set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_recomp_quiet_opts}")
         # file(GLOB) treats [ ] * ? in the WHOLE path as glob syntax, not just
         # the trailing "/*" - a title whose exported folder name carries its
         # title ID in brackets (e.g. "Pokemon Sword[0100ABF008968000][US][v0]",
@@ -96,6 +113,7 @@ if (SUYU_CMD OR YUZU_CMD)
                 list(APPEND _recomp_libs "recomp_static_${_m}")
             endif()
         endforeach()
+        set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_recomp_host_opts}")
         if (_recomp_libs)
             add_executable(suyu-cmd-static ${SUYU_CMD_SOURCES}
                            "${SUYU_CMD_RECOMP_DIR}/recomp_registration.c")
