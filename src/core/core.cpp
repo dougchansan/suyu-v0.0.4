@@ -507,6 +507,8 @@ struct System::Impl {
     std::shared_ptr<Service::SM::ServiceManager> service_manager;
     /// ContentProviderUnion instance
     std::unique_ptr<FileSys::ContentProviderUnion> content_provider;
+    std::optional<u32> application_version_override;
+    std::string application_display_version_override;
     /// AppLoader used to load the current executing application
     std::unique_ptr<Loader::AppLoader> app_loader;
     std::stop_source stop_event;
@@ -790,6 +792,19 @@ Service::AM::AppletManager& System::GetAppletManager() {
 
 void System::SetContentProvider(std::unique_ptr<FileSys::ContentProviderUnion> provider) {
     impl->content_provider = std::move(provider);
+}
+
+void System::SetApplicationVersionOverride(u32 version, std::string display_version) {
+    impl->application_version_override = version;
+    impl->application_display_version_override = std::move(display_version);
+}
+
+std::optional<u32> System::GetApplicationVersionOverride() const {
+    return impl->application_version_override;
+}
+
+const std::string& System::GetApplicationDisplayVersionOverride() const {
+    return impl->application_display_version_override;
 }
 
 FileSys::ContentProvider& System::GetContentProvider() {
