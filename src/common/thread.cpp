@@ -12,6 +12,9 @@
 #include "common/error.h"
 #include "common/logging.h"
 #include "common/assert.h"
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include "common/thread.h"
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -78,6 +81,22 @@ void SetCurrentThreadPriority(ThreadPriority new_priority) {
         }
     }();
     set_thread_priority(find_thread(NULL), priority);
+#elif defined(__APPLE__)
+    // pthread_setschedparam with SCHED_OTHER is close to a no-op on macOS: the
+    // scheduler goes by Quality of Service class instead. Mapping onto QoS is
+    // what actually makes a background worker yield to the threads doing the
+    // latency-sensitive work.
+    qos_class_t qos = [&]() {
+        switch (new_priority) {
+        case ThreadPriority::Low: return QOS_CLASS_UTILITY;
+        case ThreadPriority::Normal: return QOS_CLASS_DEFAULT;
+        case ThreadPriority::High: return QOS_CLASS_USER_INITIATED;
+        case ThreadPriority::VeryHigh:
+        case ThreadPriority::Critical: return QOS_CLASS_USER_INTERACTIVE;
+        default: return QOS_CLASS_DEFAULT;
+        }
+    }();
+    pthread_set_qos_class_self_np(qos, 0);
 #else
     pthread_t this_thread = pthread_self();
     const auto scheduling_type = SCHED_OTHER;
