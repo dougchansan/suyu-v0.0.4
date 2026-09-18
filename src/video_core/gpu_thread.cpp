@@ -14,6 +14,7 @@
 #include "video_core/dma_pusher.h"
 #include "video_core/gpu.h"
 #include "video_core/gpu_thread.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
 #include "video_core/host1x/host1x.h"
 #include "video_core/renderer_base.h"
 
@@ -35,7 +36,10 @@ void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Fronten
         auto current_context = context.Acquire();
         CommandDataContainer next;
         while (!stop_token.stop_requested()) {
-            state.queue.PopWait(next, stop_token);
+            {
+                ::Vulkan::StallProbe::Accum probe{::Vulkan::StallProbe::gpu_idle_ns};
+                state.queue.PopWait(next, stop_token);
+            }
             if (stop_token.stop_requested()) {
                 break;
             }

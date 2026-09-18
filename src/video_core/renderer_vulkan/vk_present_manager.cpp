@@ -8,6 +8,7 @@
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
 #include "video_core/renderer_vulkan/vk_present_manager.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -159,7 +160,10 @@ Frame* PresentManager::GetRenderFrame() {
     free_queue.pop_front();
 
     // Wait for the presentation to be finished so all frame resources are free
-    frame->present_done.Wait();
+    {
+        StallProbe::Accum probe{StallProbe::frame_wait_ns};
+        frame->present_done.Wait();
+    }
     frame->present_done.Reset();
 
     return frame;

@@ -18,6 +18,7 @@
 #include "common/settings_enums.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
 #include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -168,9 +169,12 @@ void Swapchain::Create(
 }
 
 bool Swapchain::AcquireNextImage() {
-    const VkResult result = device.GetLogical().AcquireNextImageKHR(
-        *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
-        VK_NULL_HANDLE, &image_index);
+    const VkResult result = [&] {
+        StallProbe::Accum probe{StallProbe::acquire_ns};
+        return device.GetLogical().AcquireNextImageKHR(
+            *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
+            VK_NULL_HANDLE, &image_index);
+    }();
     switch (result) {
     case VK_SUCCESS:
         break;
@@ -236,7 +240,12 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         .pResults = nullptr,
     };
     std::scoped_lock lock{scheduler.submit_mutex};
-    switch (const VkResult result = present_queue.Present(present_info)) {
+    const VkResult present_result = [&] {
+        StallProbe::Accum probe{StallProbe::present_ns};
+        return present_queue.Present(present_info);
+    }();
+    StallProbe::ReportFrame();
+    switch (const VkResult result = present_result) {
     case VK_SUCCESS:
         break;
     case VK_SUBOPTIMAL_KHR:
