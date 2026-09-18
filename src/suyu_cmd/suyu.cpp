@@ -1248,7 +1248,14 @@ int main(int argc, char** argv) {
     // screen on every single run and one slow first run. Keep it for exports
     // and keep the old blanket disable for the plain dev frontend, where the
     // startup instability it works around was originally seen.
-    if (!g_native_export_mode && Settings::values.use_disk_shader_cache.GetValue()) {
+    //
+    // SUYU_CMD_DISK_SHADER_CACHE opts a dev-frontend run back in. Benchmarking
+    // needs that: with the cache off every run recompiles every pipeline from
+    // scratch, and a synchronous compile pins the renderer at 0 fps for
+    // seconds at a time, which swamps the throughput being measured.
+    const bool opt_in_disk_shader_cache = std::getenv("SUYU_CMD_DISK_SHADER_CACHE") != nullptr;
+    if (!g_native_export_mode && !opt_in_disk_shader_cache &&
+        Settings::values.use_disk_shader_cache.GetValue()) {
         LOG_WARNING(Frontend,
                     "suyu-cmd: disabling disk shader cache for this run to avoid known startup instability");
         Settings::values.use_disk_shader_cache.SetValue(false);
