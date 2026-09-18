@@ -11,6 +11,9 @@
 #include <memory>
 #include <span>
 #include <thread>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #include <vector>
 #include <bit>
 #include <numeric>
@@ -319,6 +322,25 @@ size_t GetTotalPipelineWorkers() {
         return 1ULL;
     }
     return std::min(max_core_threads, desired);
+#elif defined(__APPLE__)
+    // hardware_concurrency counts efficiency cores too, but SPIR-V -> MSL
+    // translation only makes progress on a performance core, so one builder per
+    // logical core does not buy parallelism - it just oversubscribes. On an M5
+    // that is 9 builders contending for 4 performance cores, which leaves the
+    // guest CPU threads and the render thread nothing to run on while a burst
+    // of shaders is translated, and the frame rate drops to zero until it ends.
+    //
+    // Half the performance cores keeps translation moving while leaving room
+    // for the guest. Translation is slower in wall-clock terms; the emulator
+    // stays responsive through it, which is the trade worth making.
+    size_t perf_cores = 0;
+    size_t perf_cores_len = sizeof(perf_cores);
+    if (sysctlbyname("hw.perflevel0.logicalcpu", &perf_cores, &perf_cores_len, nullptr, 0) != 0 ||
+        perf_cores == 0) {
+        perf_cores = 4;
+    }
+    const size_t desired = std::max<size_t>(perf_cores / 2ULL, 1ULL);
+    return std::min(max_core_threads, desired);
 #else
     return max_core_threads;
 #endif
@@ -357,7 +379,7 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_asynchronous_shaders{Settings::values.use_asynchronous_shaders.GetValue()},
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue()},
       workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
-              "VkPipelineBuilder"),
+              "VkPipelineBuilder", {}, Common::ThreadPriority::Low),
       serialization_thread(1, "VkPipelineSerialization") {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};

@@ -37,10 +37,16 @@ class StatefulThreadWorker {
     using StateMaker = std::conditional_t<with_state, std::function<StateType()>, DummyCallable>;
 
 public:
-    explicit StatefulThreadWorker(size_t num_workers, std::string name, StateMaker func = {})
+    explicit StatefulThreadWorker(size_t num_workers, std::string name, StateMaker func = {},
+                                  ThreadPriority priority = ThreadPriority::Normal)
         : workers_queued{num_workers}, thread_name{std::move(name)} {
-        const auto lambda = [this, func](std::stop_token stop_token) {
+        const auto lambda = [this, func, priority](std::stop_token stop_token) {
             Common::SetCurrentThreadName(thread_name.c_str());
+            // Pools that exist to do bulk background work ask for a lower
+            // priority so they cannot crowd out the threads a frame depends on.
+            if (priority != ThreadPriority::Normal) {
+                Common::SetCurrentThreadPriority(priority);
+            }
             {
                 [[maybe_unused]] std::conditional_t<with_state, StateType, int> state{func()};
                 while (!stop_token.stop_requested()) {
