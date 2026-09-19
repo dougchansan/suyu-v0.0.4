@@ -47,7 +47,7 @@ jobs:
           # shader step requires by name.
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config ninja-build nasm autoconf \
-            qt6-base-dev qt6-base-private-dev libqt6svg6-dev libqt6charts6-dev \
+            qt6-base-dev qt6-base-dev-tools qt6-base-private-dev libqt6svg6-dev libqt6charts6-dev \
             qt6-multimedia-dev libqt6opengl6-dev glslang-tools \
             libboost-dev libboost-filesystem-dev libboost-context-dev \
             libusb-1.0-0-dev libssl-dev \
@@ -110,11 +110,18 @@ jobs:
           cp LICENSE.txt _pkg/
           if [ -f build/no-jit-audit.txt ]; then cp build/no-jit-audit.txt _pkg/; fi
           tar -czf '${{ matrix.archive }}' -C _pkg .
+
+      - name: Package AppImage
+        if: matrix.variant == 'standard'
+        run: bash scripts/package-appimage.sh
+
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.variant }}
-          path: ${{ matrix.archive }}
-          if-no-files-found: error
+          path: |
+            ${{ matrix.archive }}
+            *.AppImage
+          if-no-files-found: warn
 
   build-windows:
     name: Windows (${{ matrix.variant }})

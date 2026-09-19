@@ -140,8 +140,9 @@ struct GPU::Impl {
             request();
             current_sync_fence.fetch_add(1, std::memory_order_release);
             sync_request_mutex.lock();
-            sync_request_cv.notify_all();
         }
+        lck.unlock();
+        sync_request_cv.notify_all();
     }
 
     [[nodiscard]] u64 GetTicks() const {
