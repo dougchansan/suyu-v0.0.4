@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <mutex>
 #include <numeric>
@@ -17,6 +19,7 @@
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/settings.h"
+#include "core/arm/recomp/aot_trace.h"
 #include "core/perf_stats.h"
 
 using namespace std::chrono_literals;
@@ -30,10 +33,35 @@ constexpr std::size_t IgnoreFrames = 5;
 
 namespace Core {
 
-PerfStats::PerfStats(u64 title_id_) : title_id(title_id_) {}
+PerfStats::PerfStats(u64 title_id_)
+    : aot_session{Aot::CaptureSample()}, title_id{title_id_} {
+    // Opt-in: normal runs perform no per-frame trace I/O or counter sampling.
+    const auto* trace_path = std::getenv("SUYU_AOT_TRACE");
+    if (!trace_path || !*trace_path || title_id == 0) {
+        return;
+    }
+    const auto env = [](const char* name) -> std::string {
+        const auto* value = std::getenv(name);
+        return value ? value : "";
+    };
+    aot_trace = std::make_unique<Aot::TraceWriter>(trace_path, Aot::TraceMetadata{
+        title_id, env("SUYU_AOT_BUILD_ID"), env("SUYU_AOT_WORKLOAD_ID"),
+        env("SUYU_AOT_CONTENT_ID"), env("SUYU_AOT_CONFIG_ID"), env("SUYU_AOT_MACHINE_ID")});
+    if (!aot_trace->Good()) {
+        std::fputs("AOT trace could not be opened; no benchmark evidence will be recorded.\n",
+                   stderr);
+        aot_trace.reset();
+    }
+}
 
 PerfStats::~PerfStats() {
-    if (!Settings::values.record_frame_times || title_id == 0) {
+    if (aot_trace) {
+        aot_trace->Finish(aot_session.Observe(Aot::CaptureSample()));
+        if (!aot_trace->Good()) {
+            std::fputs("AOT trace write failed; discard this benchmark trace.\n", stderr);
+        }
+    }
+    if (!Settings::values.record_frame_times || title_id == 0 || current_index <= IgnoreFrames) {
         return;
     }
 
@@ -81,6 +109,11 @@ void PerfStats::EndSystemFrame() {
 
     previous_frame_length = frame_end - previous_frame_end;
     previous_frame_end = frame_end;
+    if (aot_trace) {
+        aot_session.Observe(Aot::CaptureSample(), true);
+        aot_trace->Frame(std::chrono::duration<double, std::milli>(frame_time).count(),
+                         std::chrono::duration<double, std::milli>(previous_frame_length).count());
+    }
 }
 
 void PerfStats::EndGameFrame() {
@@ -106,15 +139,20 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
     // Walltime elapsed since stats were reset
     const auto interval = duration_cast<DoubleSecs>(now - reset_point).count();
 
-    const auto system_us_per_second = (current_system_time_us - reset_point_system_us) / interval;
-    const auto current_frames = static_cast<double>(game_frames.load(std::memory_order_relaxed));
-    const auto current_fps = current_frames / interval;
+    // An exchange cannot discard a frame increment racing with the reset.
+    const auto current_frames = game_frames.exchange(0, std::memory_order_relaxed);
+    const auto rates = Aot::CalculateFrameRates(
+        interval, system_frames, current_frames,
+        duration_cast<DoubleSecs>(accumulated_frametime).count(),
+        duration_cast<DoubleSecs>(current_system_time_us - reset_point_system_us).count());
+    const auto current_fps = rates.game_fps;
     const PerfStatsResults results{
-        .system_fps = static_cast<double>(system_frames) / interval,
+        .system_fps = rates.system_fps,
         .average_game_fps = (current_fps + previous_fps) / 2.0,
-        .frametime = duration_cast<DoubleSecs>(accumulated_frametime).count() /
-                     static_cast<double>(system_frames),
-        .emulation_speed = system_us_per_second.count() / 1'000'000.0,
+        .frametime = rates.active_seconds_per_system_frame,
+        .emulation_speed = rates.emulation_speed,
+        .game_frames = current_frames,
+        .aot = aot_session.Observe(Aot::CaptureSample()),
     };
 
     // Reset counters
@@ -122,7 +160,6 @@ PerfStatsResults PerfStats::GetAndResetStats(microseconds current_system_time_us
     reset_point_system_us = current_system_time_us;
     accumulated_frametime = Clock::duration::zero();
     system_frames = 0;
-    game_frames.store(0, std::memory_order_relaxed);
     previous_fps = current_fps;
 
     return results;

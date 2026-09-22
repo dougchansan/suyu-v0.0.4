@@ -7,10 +7,16 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include "common/common_types.h"
+#include "core/arm/recomp/aot_metrics.h"
 
 namespace Core {
+
+namespace Aot {
+class TraceWriter;
+}
 
 struct PerfStatsResults {
     /// System FPS (LCD VBlanks) in Hz
@@ -19,8 +25,12 @@ struct PerfStatsResults {
     double average_game_fps;
     /// Walltime per system frame, in seconds, excluding any waits
     double frametime;
-    /// Ratio of walltime / emulated time elapsed
+    /// Ratio of emulated time / walltime elapsed
     double emulation_speed;
+    /// Raw count consumed atomically for this interval (before FPS smoothing).
+    u64 game_frames{};
+    /// Session-scoped CPU evidence; never an instruction/time coverage percentage.
+    Aot::Report aot{};
 };
 
 /**
@@ -53,6 +63,8 @@ public:
 
 private:
     mutable std::mutex object_mutex;
+    Aot::Session aot_session;
+    std::unique_ptr<Aot::TraceWriter> aot_trace;
 
     /// Title ID for the game that is running. 0 if there is no game running yet
     u64 title_id{0};

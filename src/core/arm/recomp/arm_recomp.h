@@ -4,12 +4,12 @@
 #pragma once
 
 #include <cstddef>
-#include <array>
 #include <memory>
 #include <map>
 #include <string>
 
 #include "core/arm/arm_interface.h"
+#include "core/arm/recomp/recomp_stats.h"
 
 namespace Kernel {
 class KProcess;
@@ -53,7 +53,6 @@ void SetRecompLookup(RecompLookupFn lookup);
 void SetRecompLongSlices(bool enabled);
 /// True only after every loaded compiled module negotiated guard version 2.
 void SetRecompCodeGuardReady(bool ready);
-bool IsRecompCodeGuardReady();
 
 /// Called once per loaded module when a process starts, so each recompiled
 /// image can be told where its module actually landed. Addresses baked in by
@@ -80,40 +79,6 @@ bool PrepareRecompProcess(Kernel::KProcess& process, const RecompModules& module
 /// Returns the registered lookup, or nullptr when no recompiled image is
 /// loaded and the JIT should be used.
 RecompLookupFn GetRecompLookup();
-
-/// What the CPU is actually doing, for display while a game is running.
-///
-/// Whether execution is statically recompiled is otherwise only visible in a
-/// coverage file written after the fact, which is no use to someone watching
-/// the game. `jit_transitions` is the number that settles it: an image that
-/// never reaches the JIT reports zero, and one transition is one too many.
-struct RecompLiveStats {
-    u64 static_blocks;      ///< blocks executed from recompiled images
-    u64 jit_transitions;    ///< times execution had to leave them
-    u64 forced_cutoff_pc;   ///< diagnostic static-block cutoff handoff PC
-    u64 forced_cutoff_blocks;
-    bool backend_active;    ///< ArmRecomp is the CPU for this process
-    bool jit_available;     ///< false when built without a dynamic recompiler
-    /// No JIT fallback is permitted: uncovered code stops execution rather than
-    /// handing off. This is what separates a "suyu static AOT" run from a
-    /// "Hybrid AOT + JIT" one - both execute recompiled code, but only the
-    /// hybrid one is allowed to leave it - so the frontend cannot name the
-    /// running backend without it.
-    bool strict_mode;
-};
-RecompLiveStats GetRecompLiveStats();
-
-// Process-wide monotonically accumulated diagnostic counters. Fields are sampled
-// independently; callers may subtract a stopped-session baseline.
-struct RecompExecutionStats {
-    u64 blocks{};
-    u64 svc_calls{};
-    u64 lookup_misses{};
-    u64 unhandled{};
-    u64 no_fallback{};
-};
-RecompExecutionStats GetRecompExecutionStats();
-std::array<u64, 4> GetRecompCurrentPcs();
 
 /**
  * CPU backend that executes statically recompiled AArch64 rather than JITing

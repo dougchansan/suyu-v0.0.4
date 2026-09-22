@@ -1,0 +1,57 @@
+name: AOT measurement contracts
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/aot-contract.yml'
+      - 'src/core/arm/recomp/**'
+      - 'src/core/perf_stats.*'
+      - 'tests/aot/**'
+      - 'tools/aot/**'
+  push:
+    branches: [mk8-recomp]
+    paths:
+      - '.github/workflows/aot-contract.yml'
+      - 'src/core/arm/recomp/**'
+      - 'src/core/perf_stats.*'
+      - 'tests/aot/**'
+      - 'tools/aot/**'
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / sanitizers=${{ matrix.sanitize }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            compiler: g++
+            sanitize: 'OFF'
+          - os: ubuntu-24.04
+            compiler: clang++
+            sanitize: 'ON'
+          - os: macos-14
+            compiler: clang++
+            sanitize: 'OFF'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Configure standalone component tests (not a full emulator build)
+        run: >-
+          cmake -S tests/aot -B build-aot -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DAOT_TEST_SANITIZERS=${{ matrix.sanitize }}
+      - name: Build
+        run: cmake --build build-aot --parallel 2
+      - name: Test contracts and production PerfStats component
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: ctest --test-dir build-aot --output-on-failure
