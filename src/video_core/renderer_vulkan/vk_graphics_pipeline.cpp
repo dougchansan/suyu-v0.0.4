@@ -1142,6 +1142,31 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                 if (index == 0) {
                     cache_key.pipeline.unique_hashes = {};
                     cache_key.pipeline.unique_hashes[0] = code_hashes[0];
+                    cache_key.variant = static_cast<u32>(has_tess_stages);
+                    auto& state = cache_key.pipeline.state;
+                    // Vertex input consumes only the vertex layout and input assembly state.
+                    // Keep the dynamic flags used by FixedPipelineState::Size().
+                    constexpr u32 input_bits = (1U << 0) | (1U << 1) | (1U << 3) |
+                                               (1U << 5) | (0xFU << 24);
+                    state.raw1 &= input_bits;
+                    state.raw2 = 0;
+                    state.color_formats.fill(0);
+                    state.alpha_test_ref = 0;
+                    state.point_size = 0;
+                    state.viewport_swizzles.fill(0);
+                    state.attribute_types = 0;
+                    state.dynamic_state.raw1 &= 1U << 3; // static primitive restart
+                    state.dynamic_state.raw2 = 0;
+                    for (auto& attachment : state.attachments) {
+                        attachment.raw = 0;
+                    }
+                    if (state.dynamic_vertex_input) {
+                        for (auto& attribute : state.attributes) {
+                            attribute.raw = 0;
+                        }
+                        state.binding_divisors.fill(0);
+                        state.vertex_strides.fill(0);
+                    }
                 } else if (index == 1 || index == 2) {
                     cache_key.layout_signature = layout_signature;
                     cache_key.pipeline.unique_hashes = {};
@@ -1191,6 +1216,27 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                     cache_key.pipeline.unique_hashes = {};
                     cache_key.variant = static_cast<u32>(fragment_has_color0_output) |
                                         (Settings::values.sample_shading.GetValue() << 1);
+                    auto& state = cache_key.pipeline.state;
+                    // Fragment output consumes blend, multisample, and render-pass state.
+                    // Preserve flags that determine the serialized state size.
+                    constexpr u32 output_bits = (1U << 0) | (1U << 2) | (1U << 3) |
+                                                (1U << 4) | (1U << 5) | (3U << 20) |
+                                                (0xFU << 28);
+                    constexpr u32 render_pass_and_alpha = (1U << 5) | (0x1FU << 6) |
+                                                          (3U << 15);
+                    state.raw1 &= output_bits;
+                    state.raw2 &= render_pass_and_alpha;
+                    state.alpha_test_ref = 0;
+                    state.point_size = 0;
+                    state.viewport_swizzles.fill(0);
+                    state.attribute_types = 0;
+                    state.dynamic_state.raw1 &= (0xFU << 6) | (1U << 10);
+                    state.dynamic_state.raw2 = 0;
+                    for (auto& attribute : state.attributes) {
+                        attribute.raw = 0;
+                    }
+                    state.binding_divisors.fill(0);
+                    state.vertex_strides.fill(0);
                 }
                 const auto part_start = time_pipeline ? std::chrono::steady_clock::now()
                                                       : std::chrono::steady_clock::time_point{};
