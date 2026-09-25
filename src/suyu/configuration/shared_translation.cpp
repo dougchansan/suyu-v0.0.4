@@ -242,6 +242,9 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QWidget* parent) {
            tr("Enables GPU vendor-specific pipeline cache.\nThis option can improve shader loading "
               "time significantly in cases where the Vulkan driver does not store pipeline cache "
               "files internally."));
+    INSERT(Settings, use_graphics_pipeline_library, tr("Use graphics pipeline libraries"),
+           tr("Builds Vulkan graphics pipelines from reusable parts when supported by the driver. "
+              "Disable this if a driver shows rendering issues. Requires a restart."));
     INSERT(
         Settings, enable_compute_pipelines, tr("Enable Compute Pipelines (Intel Vulkan Only)"),
         tr("Enable compute pipelines, required by some games.\nThis setting only exists for Intel "
