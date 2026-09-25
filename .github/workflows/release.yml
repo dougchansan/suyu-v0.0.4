@@ -442,7 +442,8 @@ jobs:
         # root and every submodule so export-ignore attributes exclude retained
         # developer binaries without dropping corresponding submodule source.
         run: |
-          NAME="suyu-${GITHUB_REF_NAME:-manual}-source"
+          REF_NAME="${GITHUB_REF_NAME:-manual}"
+          NAME="suyu-${REF_NAME//\//-}-source"
           git archive --format=tar --prefix="${NAME}/" HEAD > "${NAME}.tar"
           # A source archive has no .git, so the version module reads these
           # files instead; without them a build from it calls itself 1.0.0.
