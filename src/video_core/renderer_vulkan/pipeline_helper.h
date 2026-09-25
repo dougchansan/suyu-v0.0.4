@@ -65,6 +65,21 @@ public:
                num_descriptors <= device->MaxPushDescriptors();
     }
 
+    u64 LayoutSignature(bool use_push_descriptor) const noexcept {
+        u64 hash = use_push_descriptor ? 0x9e3779b97f4a7c15ULL : 0xcbf29ce484222325ULL;
+        const auto mix = [&hash](u64 value) {
+            hash = (hash ^ value) * 0x100000001b3ULL;
+        };
+        mix(bindings.size());
+        for (const auto& entry : bindings) {
+            mix(entry.binding);
+            mix(entry.descriptorType);
+            mix(entry.descriptorCount);
+            mix(entry.stageFlags);
+        }
+        return hash;
+    }
+
     // TODO(crueter): utilize layout binding flags
     vk::DescriptorSetLayout CreateDescriptorSetLayout(bool use_push_descriptor) const {
         if (bindings.empty()) {

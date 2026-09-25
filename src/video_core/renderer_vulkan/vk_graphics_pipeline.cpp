@@ -5,8 +5,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <span>
+#include <stdexcept>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
@@ -248,11 +251,16 @@ GraphicsPipeline::GraphicsPipeline(
     const Device& device_, DescriptorPool& descriptor_pool,
     GuestDescriptorQueue& guest_descriptor_queue_, Common::ThreadWorker* worker_thread,
     PipelineStatistics* pipeline_statistics, RenderPassCache& render_pass_cache,
-    const GraphicsPipelineCacheKey& key_, std::array<vk::ShaderModule, NUM_STAGES> stages,
+    GraphicsPipelineLibraryCache& library_cache_, Common::ThreadWorker& optimization_worker_,
+    const GraphicsPipelineCacheKey& key_, bool precompile_only_,
+    std::array<vk::ShaderModule, NUM_STAGES> stages,
+    std::array<u64, NUM_STAGES> code_hashes_,
     const std::array<const Shader::Info*, NUM_STAGES>& infos)
     : key{key_}, device{device_}, texture_cache{texture_cache_}, buffer_cache{buffer_cache_},
-      pipeline_cache(pipeline_cache_), scheduler{scheduler_},
-      guest_descriptor_queue{guest_descriptor_queue_}, spv_modules{std::move(stages)} {
+      pipeline_cache(pipeline_cache_), library_cache(library_cache_),
+      optimization_worker(optimization_worker_), scheduler{scheduler_},
+      guest_descriptor_queue{guest_descriptor_queue_}, spv_modules{std::move(stages)},
+      code_hashes{code_hashes_}, precompile_only{precompile_only_} {
     if (shader_notify) {
         shader_notify->MarkShaderBuilding();
     }
@@ -273,6 +281,12 @@ GraphicsPipeline::GraphicsPipeline(
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     auto func{[this, shader_notify, &render_pass_cache, &descriptor_pool, pipeline_statistics] {
+        static const bool time_pipeline = [] {
+            const char* value = std::getenv("SUYU_VK_PIPELINE_TIMING");
+            return value && *value && *value != '0';
+        }();
+        const auto setup_start = time_pipeline ? std::chrono::steady_clock::now()
+                                               : std::chrono::steady_clock::time_point{};
         // Publish the build result on every exit path. Anything that escapes
         // this lambda used to leave is_built false forever, and ConfigureDraw
         // waits on it from the scheduler thread with no timeout, so a single
@@ -292,6 +306,7 @@ GraphicsPipeline::GraphicsPipeline(
         try {
             DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
             uses_push_descriptor = builder.CanUsePushDescriptor();
+            layout_signature = builder.LayoutSignature(uses_push_descriptor);
             descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
 
             if (!uses_push_descriptor) {
@@ -306,8 +321,14 @@ GraphicsPipeline::GraphicsPipeline(
 
             const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state))};
             Validate();
+            if (time_pipeline) {
+                const auto setup_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - setup_start).count();
+                LOG_INFO(Render_Vulkan, "Pipeline {:016x} descriptor/render-pass setup {:.2f} ms",
+                         key.Hash(), setup_ms);
+            }
             MakePipeline(render_pass);
-            if (pipeline_statistics) {
+            if (pipeline_statistics && pipeline) {
                 pipeline_statistics->Collect(device, *pipeline);
             }
         } catch (const std::exception& exception) {
@@ -558,9 +579,36 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // No pipeline to bind. Drop the draw instead of binding a null handle.
         return false;
     }
+    if (!pipeline) {
+        std::scoped_lock lock{build_mutex};
+        if (build_failed.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (!pipeline) {
+            precompile_only = false;
+            try {
+                MakePipeline(optimized_render_pass);
+            } catch (const std::exception& exception) {
+                LOG_ERROR(Render_Vulkan, "Failed to link precompiled pipeline {:016x}: {}",
+                          key.Hash(), exception.what());
+                build_failed.store(true, std::memory_order_relaxed);
+                return false;
+            }
+        }
+    }
+    if (pipeline_libraries[0] &&
+        !optimization_queued.exchange(true, std::memory_order_relaxed)) {
+        optimization_worker.QueueWork([this] { OptimizePipeline(); });
+    }
+    const bool use_optimized = optimized_ready.load(std::memory_order_acquire);
     const bool is_rescaling{texture_cache.IsRescaling()};
     const bool update_rescaling{scheduler.UpdateRescaling(is_rescaling)};
-    const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this)};
+    const bool bind_pipeline{scheduler.UpdateGraphicsPipeline(this) ||
+                             use_optimized != bound_optimized};
+    if (bind_pipeline) {
+        bound_optimized = use_optimized;
+    }
+    const VkPipeline pipeline_handle = use_optimized ? *optimized_pipeline : *pipeline;
 
     // Log graphics pipeline binding
     if (bind_pipeline && GPU::Logging::IsActive() &&
@@ -570,12 +618,13 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     }
 
     const void* const descriptor_data{guest_descriptor_queue.UpdateData()};
-    scheduler.Record([this, descriptor_data, bind_pipeline, rescaling_data = rescaling.Data(),
+    scheduler.Record([this, descriptor_data, bind_pipeline, pipeline_handle,
+                      rescaling_data = rescaling.Data(),
                       is_rescaling, update_rescaling,
                       uses_render_area = render_area.uses_render_area,
                       render_area_data = render_area.words](vk::CommandBuffer cmdbuf) {
         if (bind_pipeline) {
-            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, *pipeline);
+            cmdbuf.BindPipeline(VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_handle);
         }
         cmdbuf.PushConstants(*pipeline_layout, VK_SHADER_STAGE_ALL_GRAPHICS,
                              RESCALING_LAYOUT_WORDS_OFFSET, sizeof(rescaling_data),
@@ -1020,7 +1069,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     }
 
-    pipeline = device.GetLogical().CreateGraphicsPipeline({
+    static const bool time_pipeline = [] {
+        const char* value = std::getenv("SUYU_VK_PIPELINE_TIMING");
+        return value && *value && *value != '0';
+    }();
+    const auto driver_start = time_pipeline ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+    const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -1040,7 +1095,127 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    bool gpl_precompiled{};
+    if (device.IsGraphicsPipelineLibrarySupported() && !key.state.xfb_enabled &&
+        dynamic.rasterize_enable != 0 && spv_modules[NUM_STAGES - 1]) {
+        try {
+            std::array<std::shared_ptr<vk::Pipeline>, 4> libraries;
+            std::array<VkPipeline, 4> handles{};
+            constexpr std::array parts{
+                VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT,
+                VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT,
+                VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT,
+                VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT,
+            };
+            static_vector<VkPipelineShaderStageCreateInfo, 4> pre_raster_stages;
+            const VkPipelineShaderStageCreateInfo* fragment_stage{};
+            for (const auto& stage : shader_stages) {
+                if (stage.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
+                    fragment_stage = &stage;
+                } else {
+                    pre_raster_stages.push_back(stage);
+                }
+            }
+            for (size_t index = 0; index < parts.size(); ++index) {
+                VkGraphicsPipelineLibraryCreateInfoEXT library_info{
+                    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
+                    .pNext = nullptr,
+                    .flags = static_cast<VkGraphicsPipelineLibraryFlagsEXT>(parts[index]),
+                };
+                auto create_info = pipeline_ci;
+                create_info.pNext = &library_info;
+                create_info.flags = VK_PIPELINE_CREATE_LIBRARY_BIT_KHR |
+                                    VK_PIPELINE_CREATE_RETAIN_LINK_TIME_OPTIMIZATION_INFO_BIT_EXT;
+                create_info.stageCount = index == 1 ? static_cast<u32>(pre_raster_stages.size())
+                                           : index == 2 && fragment_stage ? 1U : 0U;
+                create_info.pStages = index == 1 ? pre_raster_stages.data()
+                                     : index == 2 ? fragment_stage : nullptr;
+                GraphicsPipelineLibraryKey cache_key{key, static_cast<u32>(index), 0};
+                if (index == 0) {
+                    cache_key.pipeline.unique_hashes = {};
+                    cache_key.pipeline.unique_hashes[0] = code_hashes[0];
+                } else if (index == 1 || index == 2) {
+                    cache_key.layout_signature = layout_signature;
+                    cache_key.pipeline.unique_hashes = {};
+                    std::ranges::copy(code_hashes,
+                                      cache_key.pipeline.unique_hashes.begin());
+                    for (auto& attachment : cache_key.pipeline.state.attachments) {
+                        attachment.raw = 0;
+                    }
+                    cache_key.variant = static_cast<u32>(fragment_has_color0_output) |
+                                        (Settings::values.sample_shading.GetValue() << 1);
+                } else {
+                    cache_key.pipeline.unique_hashes = {};
+                    cache_key.variant = static_cast<u32>(fragment_has_color0_output) |
+                                        (Settings::values.sample_shading.GetValue() << 1);
+                }
+                const auto part_start = time_pipeline ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
+                bool cache_hit{};
+                libraries[index] = library_cache.GetOrCreate(cache_key, [&] {
+                    return device.GetLogical().CreateGraphicsPipeline(create_info, *pipeline_cache);
+                }, &cache_hit);
+                if (!static_cast<bool>(*libraries[index])) {
+                    throw std::runtime_error("driver returned a null pipeline library");
+                }
+                handles[index] = **libraries[index];
+                if (time_pipeline) {
+                    const auto part_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - part_start).count();
+                    LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL part {} {} {:.2f} ms",
+                             key.Hash(), index, cache_hit ? "reused" : "built", part_ms);
+                }
+            }
+            if (!precompile_only) {
+                const VkPipelineLibraryCreateInfoKHR link_info{
+                    .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
+                    .pNext = nullptr,
+                    .libraryCount = static_cast<u32>(handles.size()),
+                    .pLibraries = handles.data(),
+                };
+                const VkGraphicsPipelineCreateInfo link_ci{
+                    .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                    .pNext = &link_info,
+                    .flags = flags,
+                    .stageCount = 0,
+                    .pStages = nullptr,
+                    .layout = *pipeline_layout,
+                    .renderPass = render_pass,
+                    .subpass = 0,
+                };
+                const auto link_start = time_pipeline ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
+                pipeline = device.GetLogical().CreateGraphicsPipeline(link_ci, *pipeline_cache);
+                if (!pipeline) {
+                    throw std::runtime_error("driver returned a null fast-linked pipeline");
+                }
+                if (time_pipeline) {
+                    const auto link_ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - link_start).count();
+                    LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL fast link {:.2f} ms",
+                             key.Hash(), link_ms);
+                }
+            }
+            pipeline_libraries = std::move(libraries);
+            optimized_render_pass = render_pass;
+            optimized_flags = flags;
+            gpl_precompiled = true;
+        } catch (const std::exception& exception) {
+            pipeline_libraries = {};
+            LOG_WARNING(Render_Vulkan, "Pipeline {:016x} GPL creation failed: {}; using monolithic path",
+                        key.Hash(), exception.what());
+        }
+    }
+    if (!pipeline && !gpl_precompiled) {
+        pipeline = device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
+    }
+    if (time_pipeline) {
+        const auto driver_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - driver_start).count();
+        LOG_INFO(Render_Vulkan, "Pipeline {:016x} vkCreateGraphicsPipelines {:.2f} ms",
+                 key.Hash(), driver_ms);
+    }
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {
@@ -1050,6 +1225,47 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
             color_blend_ci.attachmentCount
         );
         GPU::Logging::GPULogger::GetInstance().LogPipelineStateChange(pipeline_info);
+    }
+}
+
+void GraphicsPipeline::OptimizePipeline() {
+    try {
+        std::array<VkPipeline, 4> handles{};
+        for (size_t index = 0; index < handles.size(); ++index) {
+            handles[index] = **pipeline_libraries[index];
+        }
+        const VkPipelineLibraryCreateInfoKHR link_info{
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR,
+            .pNext = nullptr,
+            .libraryCount = static_cast<u32>(handles.size()),
+            .pLibraries = handles.data(),
+        };
+        const VkGraphicsPipelineCreateInfo link_ci{
+            .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+            .pNext = &link_info,
+            .flags = optimized_flags | VK_PIPELINE_CREATE_LINK_TIME_OPTIMIZATION_BIT_EXT,
+            .stageCount = 0,
+            .pStages = nullptr,
+            .layout = *pipeline_layout,
+            .renderPass = optimized_render_pass,
+            .subpass = 0,
+        };
+        const auto start = std::chrono::steady_clock::now();
+        optimized_pipeline = device.GetLogical().CreateGraphicsPipeline(link_ci, *pipeline_cache);
+        if (!optimized_pipeline) {
+            throw std::runtime_error("driver returned a null optimized pipeline");
+        }
+        optimized_ready.store(true, std::memory_order_release);
+        const char* timing = std::getenv("SUYU_VK_PIPELINE_TIMING");
+        if (timing && *timing && *timing != '0') {
+            const auto elapsed = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL optimized link {:.2f} ms",
+                     key.Hash(), elapsed);
+        }
+    } catch (const std::exception& exception) {
+        LOG_WARNING(Render_Vulkan, "Pipeline {:016x} GPL optimized link failed: {}",
+                    key.Hash(), exception.what());
     }
 }
 
