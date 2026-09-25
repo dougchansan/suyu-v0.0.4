@@ -467,7 +467,7 @@ u32 ComputeEnvironment::ReadViewportTransformState() {
     return viewport_transform_state;
 }
 
-void FileEnvironment::Deserialize(std::ifstream& file) {
+void FileEnvironment::Deserialize(std::ifstream& file, std::streampos end) {
     u64 code_size{};
     u64 num_texture_types{};
     u64 num_texture_pixel_formats{};
@@ -487,8 +487,23 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         .read(reinterpret_cast<char*>(&read_highest), sizeof(read_highest))
         .read(reinterpret_cast<char*>(&viewport_transform_state), sizeof(viewport_transform_state))
         .read(reinterpret_cast<char*>(&stage), sizeof(stage));
+    const auto require_bytes = [&](u64 count, u64 item_size) {
+        const auto position = file.tellg();
+        if (position < std::streampos{} || position > end ||
+            count > static_cast<u64>(end - position) / item_size) {
+            throw std::ios_base::failure("Invalid pipeline cache environment length");
+        }
+    };
+    // GenericEnvironment scans at most 1 MiB and serializes one extra instruction.
+    if (code_size > 0x100000 + INST_SIZE || read_highest < read_lowest ||
+        read_lowest != start_address ||
+        code_size != static_cast<u64>(read_highest) - read_lowest + INST_SIZE) {
+        throw std::ios_base::failure("Invalid pipeline cache shader size");
+    }
+    require_bytes(code_size, 1);
     code.resize(Common::DivCeil(code_size, sizeof(u64)));
     file.read(reinterpret_cast<char*>(code.data()), code_size);
+    require_bytes(num_texture_types, sizeof(u32) + sizeof(Shader::TextureType));
     for (size_t i = 0; i < num_texture_types; ++i) {
         u32 key;
         Shader::TextureType type;
@@ -496,6 +511,8 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
             .read(reinterpret_cast<char*>(&type), sizeof(type));
         texture_types.emplace(key, type);
     }
+    require_bytes(num_texture_pixel_formats,
+                  sizeof(u32) + sizeof(Shader::TexturePixelFormat));
     for (size_t i = 0; i < num_texture_pixel_formats; ++i) {
         u32 key;
         Shader::TexturePixelFormat format;
@@ -503,6 +520,7 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
             .read(reinterpret_cast<char*>(&format), sizeof(format));
         texture_pixel_formats.emplace(key, format);
     }
+    require_bytes(num_cbuf_values, sizeof(u64) + sizeof(u32));
     for (size_t i = 0; i < num_cbuf_values; ++i) {
         u64 key;
         u32 value;
@@ -510,6 +528,8 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
             .read(reinterpret_cast<char*>(&value), sizeof(value));
         cbuf_values.emplace(key, value);
     }
+    require_bytes(num_cbuf_replacement_values,
+                  sizeof(u64) + sizeof(Shader::ReplaceConstant));
     for (size_t i = 0; i < num_cbuf_replacement_values; ++i) {
         u64 key;
         Shader::ReplaceConstant value;
@@ -527,6 +547,9 @@ void FileEnvironment::Deserialize(std::ifstream& file) {
         if (stage == Shader::Stage::Geometry) {
             file.read(reinterpret_cast<char*>(&gp_passthrough_mask), sizeof(gp_passthrough_mask));
         }
+    }
+    if (initial_offset > code_size) {
+        throw std::ios_base::failure("Invalid pipeline cache shader header");
     }
     is_proprietary_driver = texture_bound == 2;
 }
@@ -680,11 +703,17 @@ void LoadPipelines(
             }
             u32 num_envs{};
             file.read(reinterpret_cast<char*>(&num_envs), sizeof(num_envs));
+            if (num_envs == 0 || num_envs > Tegra::Engines::Maxwell3D::Regs::MaxShaderProgram) {
+                throw std::ios_base::failure("Invalid pipeline cache environment count");
+            }
             std::vector<FileEnvironment> envs(num_envs);
             for (FileEnvironment& env : envs) {
-                env.Deserialize(file);
+                env.Deserialize(file, end);
             }
             if (envs.front().ShaderStage() == Shader::Stage::Compute) {
+                if (num_envs != 1) {
+                    throw std::ios_base::failure("Invalid compute pipeline cache record");
+                }
                 load_compute(file, std::move(envs.front()));
             } else {
                 load_graphics(file, std::move(envs));

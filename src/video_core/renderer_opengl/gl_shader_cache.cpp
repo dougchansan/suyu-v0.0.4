@@ -333,7 +333,8 @@ void ShaderCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
         GraphicsPipelineKey key;
         file.read(reinterpret_cast<char*>(&key), sizeof(key));
         queue_work([this, key, envs_ = std::move(envs), &state, &callback](Context* ctx) mutable {
-            boost::container::static_vector<Shader::Environment*, 5> env_ptrs;
+            boost::container::static_vector<Shader::Environment*, Maxwell::MaxShaderProgram>
+                env_ptrs;
             for (auto& env : envs_) {
                 env_ptrs.push_back(&env);
             }

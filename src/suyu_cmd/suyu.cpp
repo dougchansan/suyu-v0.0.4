@@ -2062,19 +2062,15 @@ int main(int argc, char** argv) {
     system.GPU().Start();
     system.GetCpuManager().OnGpuReady();
 
-    // A game export is launched over and over by a player, always for the same
-    // title, so the disk shader cache is the difference between a long black
-    // screen on every single run and one slow first run. Keep it for exports
-    // and keep the old blanket disable for the plain dev frontend, where the
-    // startup instability it works around was originally seen. A JIT baseline
-    // package runs no recompiled code, so it counts as an export by its layout.
-    if (!g_native_export_mode && installed_nand.empty() &&
+    // Ordinary Vulkan CLI games can reuse recorded pipelines just like game exports.
+    // Keep the old guard for other backends until their plain-CLI startup is tested.
+    if (Settings::values.renderer_backend.GetValue() != Settings::RendererBackend::Vulkan &&
+        !g_native_export_mode && installed_nand.empty() &&
         Settings::values.use_disk_shader_cache.GetValue()) {
         LOG_WARNING(Frontend,
-                    "suyu-cmd: disabling disk shader cache for this run to avoid known startup instability");
+                    "suyu-cmd: disabling disk shader cache for untested non-Vulkan CLI startup");
         Settings::values.use_disk_shader_cache.SetValue(false);
     }
-
     if (Settings::values.use_disk_shader_cache.GetValue()) {
         // Build the cached shaders on their own thread, as the Qt frontend does from its
         // emulation thread. The progress callback runs on the shader workers, so it only
