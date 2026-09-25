@@ -566,14 +566,14 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
 bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                                      const RenderAreaPushConstant& render_area) {
     scheduler.RequestRenderpass(texture_cache.GetFramebuffer());
-    if (!is_built.load(std::memory_order::relaxed)) {
+    if (!is_built.load(std::memory_order::acquire)) {
         // Wait here rather than from a recorded command. The recorded wait ran
         // on the scheduler thread after this draw had already been queued, so
         // it could never decline to draw when the build failed.
         StallProbe::Accum build_probe{StallProbe::build_wait_ns,
                                            &StallProbe::build_wait_count};
         std::unique_lock lock{build_mutex};
-        build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
+        build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::acquire); });
     }
     if (build_failed.load(std::memory_order::relaxed)) {
         // No pipeline to bind. Drop the draw instead of binding a null handle.

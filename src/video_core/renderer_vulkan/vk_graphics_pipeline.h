@@ -171,7 +171,7 @@ public:
     }
 
     [[nodiscard]] bool IsBuilt() const noexcept {
-        return is_built.load(std::memory_order::relaxed);
+        return is_built.load(std::memory_order::acquire);
     }
 
     template <typename Spec>
