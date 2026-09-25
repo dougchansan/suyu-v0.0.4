@@ -36,6 +36,7 @@
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
+#include "video_core/renderer_vulkan/vk_pipeline_timing.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -751,10 +752,10 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     bool build_in_parallel) try {
     auto hash = key.Hash();
     LOG_INFO(Render_Vulkan, "0x{:016x}", hash);
-    static const bool time_pipeline = [] {
-        const char* value = std::getenv("SUYU_VK_PIPELINE_TIMING");
-        return value && *value && *value != '0';
-    }();
+    const bool time_pipeline = PipelineTimingEnabled(hash);
+    if (time_pipeline && std::getenv("SUYU_VK_PIPELINE_TIMING_HASH")) {
+        LOG_INFO(Render_Vulkan, "Targeted graphics pipeline {:016x} compilation started", hash);
+    }
     const auto translate_start = time_pipeline ? std::chrono::steady_clock::now()
                                                : std::chrono::steady_clock::time_point{};
     size_t env_index{0};

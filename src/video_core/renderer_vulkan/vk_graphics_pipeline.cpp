@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
+#include "video_core/renderer_vulkan/vk_pipeline_timing.h"
 #include "video_core/renderer_vulkan/vk_render_pass_cache.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_stall_probe.h"
@@ -281,10 +282,7 @@ GraphicsPipeline::GraphicsPipeline(
     }
     fragment_has_color0_output = stage_infos[NUM_STAGES - 1].stores_frag_color[0];
     auto func{[this, shader_notify, &render_pass_cache, &descriptor_pool, pipeline_statistics] {
-        static const bool time_pipeline = [] {
-            const char* value = std::getenv("SUYU_VK_PIPELINE_TIMING");
-            return value && *value && *value != '0';
-        }();
+        const bool time_pipeline = PipelineTimingEnabled(key.Hash());
         const auto setup_start = time_pipeline ? std::chrono::steady_clock::now()
                                                : std::chrono::steady_clock::time_point{};
         // Publish the build result on every exit path. Anything that escapes
@@ -1076,10 +1074,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     }
 
-    static const bool time_pipeline = [] {
-        const char* value = std::getenv("SUYU_VK_PIPELINE_TIMING");
-        return value && *value && *value != '0';
-    }();
+    const bool time_pipeline = PipelineTimingEnabled(key.Hash());
     const auto driver_start = time_pipeline ? std::chrono::steady_clock::now()
                                             : std::chrono::steady_clock::time_point{};
     const VkGraphicsPipelineCreateInfo pipeline_ci{
@@ -1263,8 +1258,7 @@ void GraphicsPipeline::OptimizePipeline() {
             throw std::runtime_error("driver returned a null optimized pipeline");
         }
         optimized_ready.store(true, std::memory_order_release);
-        const char* timing = std::getenv("SUYU_VK_PIPELINE_TIMING");
-        if (timing && *timing && *timing != '0') {
+        if (PipelineTimingEnabled(key.Hash())) {
             const auto elapsed = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - start).count();
             LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL optimized link {:.2f} ms",
