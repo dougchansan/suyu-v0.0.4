@@ -483,15 +483,19 @@ void RasterizerVulkan::Clear(u32 layer_count) {
         bool is_integer = IsPixelFormatInteger(format);
         bool is_signed = IsPixelFormatSignedInteger(format);
         size_t int_size = PixelComponentSizeBitsInteger(format);
+        // Scale in f64 and clamp: a 32-bit channel's max does not fit in f32 exactly, and
+        // converting an out-of-range float to an integer is undefined.
+        const u64 max_uint = int_size == 0 ? 0 : (u64{1} << int_size) - 1;
+        const s64 max_sint = int_size == 0 ? 0 : (s64{1} << (int_size - 1)) - 1;
         VkClearValue clear_value{};
         if (!is_integer) {
             std::memcpy(clear_value.color.float32, regs.clear_color.data(), regs.clear_color.size() * sizeof(f32));
         } else if (!is_signed) {
             for (size_t i = 0; i < 4; i++)
-                clear_value.color.uint32[i] = u32(f32((1ULL << int_size) - 1) * regs.clear_color[i]);
+                clear_value.color.uint32[i] = u32(std::clamp(f64(max_uint) * regs.clear_color[i], 0.0, f64(max_uint)));
         } else {
             for (size_t i = 0; i < 4; i++)
-                clear_value.color.int32[i] = s32(f32((1LL << (int_size - 1)) - 1) * (regs.clear_color[i] * 2.0f - 1.0f));
+                clear_value.color.int32[i] = s32(std::clamp(f64(max_sint) * (regs.clear_color[i] * 2.0f - 1.0f), -f64(max_sint) - 1.0, f64(max_sint)));
         }
 
         if (regs.clear_surface.R && regs.clear_surface.G && regs.clear_surface.B && regs.clear_surface.A) {

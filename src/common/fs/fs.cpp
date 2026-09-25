@@ -336,8 +336,11 @@ bool RemoveDirContentsRecursively(const fs::path& path) {
             break;
         }
 
-        if (entry.status().type() == fs::file_type::directory) {
+        // Empty subdirectories before removing them. Use symlink_status so a symlinked
+        // directory is removed as a link instead of deleting its target's contents.
+        if (entry.symlink_status().type() == fs::file_type::directory) {
             if (!RemoveDirContentsRecursively(entry.path())) {
+                ec = std::make_error_code(std::errc::directory_not_empty);
                 break;
             }
         }

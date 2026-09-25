@@ -663,10 +663,6 @@ struct Memory::Impl {
     }
 
     bool WriteExclusive128(Common::ProcessAddress vaddr, const u128 data, const u128 expected) {
-        if ((GetInteger(vaddr) & 15) != 0) {
-            LOG_ERROR(HW_Memory, "Unaligned WriteExclusive128 @ 0x{:016X}", GetInteger(vaddr));
-            return true;
-        }
         u8* const ptr = GetPointerImpl(
             GetInteger(vaddr),
             [vaddr, data]() {
