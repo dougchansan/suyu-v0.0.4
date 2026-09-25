@@ -1075,8 +1075,10 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     }
 
     const bool time_pipeline = PipelineTimingEnabled(key.Hash());
-    const auto driver_start = time_pipeline ? std::chrono::steady_clock::now()
-                                            : std::chrono::steady_clock::time_point{};
+    const bool probe_pipeline = StallProbe::Enabled();
+    const auto driver_start = (time_pipeline || probe_pipeline)
+                                  ? std::chrono::steady_clock::now()
+                                  : std::chrono::steady_clock::time_point{};
     const VkGraphicsPipelineCreateInfo pipeline_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
@@ -1250,6 +1252,13 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     }
     if (!pipeline && !gpl_precompiled) {
         pipeline = device.GetLogical().CreateGraphicsPipeline(pipeline_ci, *pipeline_cache);
+    }
+    if (probe_pipeline) {
+        const auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - driver_start).count();
+        StallProbe::pipeline_build_ns.fetch_add(static_cast<u64>(nanoseconds),
+                                                std::memory_order_relaxed);
+        StallProbe::pipeline_build_count.fetch_add(1, std::memory_order_relaxed);
     }
     if (time_pipeline) {
         const auto driver_ms = std::chrono::duration<double, std::milli>(

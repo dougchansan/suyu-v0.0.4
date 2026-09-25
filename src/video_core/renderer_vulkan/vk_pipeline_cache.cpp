@@ -37,6 +37,7 @@
 #include "video_core/renderer_vulkan/vk_descriptor_pool.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_pipeline_timing.h"
+#include "video_core/renderer_vulkan/vk_stall_probe.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
@@ -769,11 +770,13 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     auto hash = key.Hash();
     LOG_INFO(Render_Vulkan, "0x{:016x}", hash);
     const bool time_pipeline = PipelineTimingEnabled(hash);
+    const bool probe_pipeline = StallProbe::Enabled();
+    const bool measure_pipeline = time_pipeline || probe_pipeline;
     if (time_pipeline && std::getenv("SUYU_VK_PIPELINE_TIMING_HASH")) {
         LOG_INFO(Render_Vulkan, "Targeted graphics pipeline {:016x} compilation started", hash);
     }
-    const auto translate_start = time_pipeline ? std::chrono::steady_clock::now()
-                                               : std::chrono::steady_clock::time_point{};
+    const auto translate_start = measure_pipeline ? std::chrono::steady_clock::now()
+                                                  : std::chrono::steady_clock::time_point{};
     size_t env_index{0};
     std::array<Shader::IR::Program, Maxwell::MaxShaderProgram> programs;
     const bool uses_vertex_a{key.unique_hashes[0] != 0};
@@ -817,8 +820,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
             layer_source_program = &programs[index];
         }
     }
-    const auto emit_start = time_pipeline ? std::chrono::steady_clock::now()
-                                          : std::chrono::steady_clock::time_point{};
+    const auto emit_start = measure_pipeline ? std::chrono::steady_clock::now()
+                                             : std::chrono::steady_clock::time_point{};
     std::array<const Shader::Info*, Maxwell::MaxShaderStage> infos{};
     std::array<vk::ShaderModule, Maxwell::MaxShaderStage> modules;
     std::array<u64, Maxwell::MaxShaderStage> code_hashes{};
@@ -876,13 +879,28 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
         }
         previous_stage = &program;
     }
-    if (time_pipeline) {
+    if (measure_pipeline) {
         const auto emitted = std::chrono::steady_clock::now();
-        const auto milliseconds = [](auto duration) {
-            return std::chrono::duration<double, std::milli>(duration).count();
-        };
-        LOG_INFO(Render_Vulkan, "Pipeline {:016x} shader translation {:.2f} ms, SPIR-V emission {:.2f} ms",
-                 hash, milliseconds(emit_start - translate_start), milliseconds(emitted - emit_start));
+        if (probe_pipeline) {
+            const auto nanoseconds = [](auto duration) {
+                return static_cast<u64>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count());
+            };
+            StallProbe::shader_translate_ns.fetch_add(nanoseconds(emit_start - translate_start),
+                                                       std::memory_order_relaxed);
+            StallProbe::shader_emit_ns.fetch_add(nanoseconds(emitted - emit_start),
+                                                 std::memory_order_relaxed);
+            StallProbe::shader_count.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (time_pipeline) {
+            const auto milliseconds = [](auto duration) {
+                return std::chrono::duration<double, std::milli>(duration).count();
+            };
+            LOG_INFO(Render_Vulkan,
+                     "Pipeline {:016x} shader translation {:.2f} ms, SPIR-V emission {:.2f} ms",
+                     hash, milliseconds(emit_start - translate_start),
+                     milliseconds(emitted - emit_start));
+        }
     }
     Common::ThreadWorker* const thread_worker{build_in_parallel ? &workers : nullptr};
     return std::make_unique<GraphicsPipeline>(

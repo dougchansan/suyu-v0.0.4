@@ -235,25 +235,39 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
     SCOPE_EXIT {
         gpu.TickWork();
     };
-    FlushWork();
-    gpu_memory->FlushCaching();
+    {
+        StallProbe::Accum probe{StallProbe::draw_flush_ns};
+        FlushWork();
+        gpu_memory->FlushCaching();
+    }
 
-    GraphicsPipeline* const pipeline{pipeline_cache.CurrentGraphicsPipeline()};
+    GraphicsPipeline* pipeline{};
+    {
+        StallProbe::Accum probe{StallProbe::pipeline_lookup_ns};
+        pipeline = pipeline_cache.CurrentGraphicsPipeline();
+    }
     if (!pipeline) {
         return;
     }
     std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
     // update engine as channel may be different.
     pipeline->SetEngine(maxwell3d, gpu_memory);
-    if (!pipeline->Configure(is_indexed))
-        return;
+    {
+        StallProbe::Accum probe{StallProbe::pipeline_configure_ns};
+        if (!pipeline->Configure(is_indexed))
+            return;
+    }
 
-    UpdateDynamicStates();
+    {
+        StallProbe::Accum probe{StallProbe::draw_record_ns};
+        UpdateDynamicStates();
 
-    query_cache.NotifySegment(true);
-    HandleTransformFeedback();
-    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);
-    draw_func();
+        query_cache.NotifySegment(true);
+        HandleTransformFeedback();
+        query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,
+                                  maxwell3d->regs.zpass_pixel_count_enable);
+        draw_func();
+    }
 }
 
 void RasterizerVulkan::Draw(bool is_indexed, u32 instance_count) {
