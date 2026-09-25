@@ -306,7 +306,9 @@ GraphicsPipeline::GraphicsPipeline(
         try {
             DescriptorLayoutBuilder builder{MakeBuilder(device, stage_infos)};
             uses_push_descriptor = builder.CanUsePushDescriptor();
-            layout_signature = builder.LayoutSignature(uses_push_descriptor);
+            if (device.IsGraphicsPipelineLibrarySupported()) {
+                layout_signature = builder.LayoutSignature(uses_push_descriptor);
+            }
             descriptor_set_layout = builder.CreateDescriptorSetLayout(uses_push_descriptor);
 
             if (!uses_push_descriptor) {
@@ -579,7 +581,7 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
         // No pipeline to bind. Drop the draw instead of binding a null handle.
         return false;
     }
-    if (!pipeline) {
+    if (!pipeline && pipeline_libraries[0]) {
         std::scoped_lock lock{build_mutex};
         if (build_failed.load(std::memory_order_relaxed)) {
             return false;
@@ -595,6 +597,11 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
                 return false;
             }
         }
+    }
+    if (!pipeline) {
+        LOG_ERROR(Render_Vulkan, "Pipeline {:016x} has no executable pipeline", key.Hash());
+        build_failed.store(true, std::memory_order_relaxed);
+        return false;
     }
     if (pipeline_libraries[0] &&
         !optimization_queued.exchange(true, std::memory_order_relaxed)) {

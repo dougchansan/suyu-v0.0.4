@@ -360,7 +360,8 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
       use_vulkan_pipeline_cache{Settings::values.use_vulkan_driver_pipeline_cache.GetValue()},
       workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
               "VkPipelineBuilder"),
-      optimization_workers(1, "VkPipelineOptimize"),
+      optimization_workers(device.IsGraphicsPipelineLibrarySupported() ? 1 : 0,
+                           "VkPipelineOptimize"),
       serialization_thread(1, "VkPipelineSerialization") {
     const auto& float_control{device.FloatControlProperties()};
     const VkDriverId driver_id{device.GetDriverID()};
@@ -586,6 +587,7 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     if (title_id == 0) {
         return;
     }
+    const auto load_start = std::chrono::steady_clock::now();
     const auto shader_dir{Common::FS::GetSuyuPath(Common::FS::SuyuPath::ShaderDir)};
     const auto base_dir{shader_dir / fmt::format("{:016x}", title_id)};
     if (!Common::FS::CreateDir(shader_dir) || !Common::FS::CreateDir(base_dir)) {
@@ -692,6 +694,13 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     lock.unlock();
 
     workers.WaitForRequests(stop_loading);
+    if (const char* timing = std::getenv("SUYU_VK_PIPELINE_TIMING");
+        timing && *timing && *timing != '0') {
+        const auto elapsed_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - load_start).count();
+        LOG_INFO(Render_Vulkan, "Boot pipeline precompile completed {}/{} entries in {:.2f} ms",
+                 state.built, state.total, elapsed_ms);
+    }
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
