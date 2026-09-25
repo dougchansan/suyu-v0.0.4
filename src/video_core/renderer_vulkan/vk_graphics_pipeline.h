@@ -77,12 +77,22 @@ struct GraphicsPipelineLibraryKey {
 
 class GraphicsPipelineLibraryCache {
 public:
+    struct Stats {
+        std::array<u64, 4> hits{};
+        std::array<u64, 4> compile_attempts{};
+        std::array<u64, 4> unique{};
+        std::array<u64, 2> link_count{};
+        std::array<u64, 2> link_total_ns{};
+        std::array<u64, 2> link_max_ns{};
+    };
+
     template <typename Create>
     std::shared_ptr<vk::Pipeline> GetOrCreate(const GraphicsPipelineLibraryKey& key,
                                               Create&& create, bool* cache_hit = nullptr) {
         {
             std::scoped_lock lock{mutex};
             if (const auto it = libraries.find(key); it != libraries.end()) {
+                hits[key.part].fetch_add(1, std::memory_order_relaxed);
                 if (cache_hit) {
                     *cache_hit = true;
                 }
@@ -90,6 +100,7 @@ public:
             }
         }
         // Compile outside the lock so unrelated boot-time shader workers can proceed.
+        compile_attempts[key.part].fetch_add(1, std::memory_order_relaxed);
         auto library = std::make_shared<vk::Pipeline>(create());
         if (!static_cast<bool>(*library)) {
             return library;
@@ -102,6 +113,36 @@ public:
         return it->second;
     }
 
+    void RecordLink(bool optimized, u64 elapsed_ns) {
+        const size_t index = optimized ? 1 : 0;
+        link_count[index].fetch_add(1, std::memory_order_relaxed);
+        link_total_ns[index].fetch_add(elapsed_ns, std::memory_order_relaxed);
+        auto previous = link_max_ns[index].load(std::memory_order_relaxed);
+        while (previous < elapsed_ns &&
+               !link_max_ns[index].compare_exchange_weak(previous, elapsed_ns,
+                                                           std::memory_order_relaxed)) {
+        }
+    }
+
+    Stats GetStats() {
+        std::scoped_lock lock{mutex};
+        Stats stats;
+        for (size_t part = 0; part < stats.hits.size(); ++part) {
+            stats.hits[part] = hits[part].load(std::memory_order_relaxed);
+            stats.compile_attempts[part] =
+                compile_attempts[part].load(std::memory_order_relaxed);
+        }
+        for (const auto& entry : libraries) {
+            ++stats.unique[entry.first.part];
+        }
+        for (size_t index = 0; index < stats.link_count.size(); ++index) {
+            stats.link_count[index] = link_count[index].load(std::memory_order_relaxed);
+            stats.link_total_ns[index] = link_total_ns[index].load(std::memory_order_relaxed);
+            stats.link_max_ns[index] = link_max_ns[index].load(std::memory_order_relaxed);
+        }
+        return stats;
+    }
+
 private:
     struct Hash {
         size_t operator()(const GraphicsPipelineLibraryKey& key) const noexcept {
@@ -112,6 +153,11 @@ private:
     };
     std::mutex mutex;
     std::unordered_map<GraphicsPipelineLibraryKey, std::shared_ptr<vk::Pipeline>, Hash> libraries;
+    std::array<std::atomic<u64>, 4> hits{};
+    std::array<std::atomic<u64>, 4> compile_attempts{};
+    std::array<std::atomic<u64>, 2> link_count{};
+    std::array<std::atomic<u64>, 2> link_total_ns{};
+    std::array<std::atomic<u64>, 2> link_max_ns{};
 };
 
 class Device;

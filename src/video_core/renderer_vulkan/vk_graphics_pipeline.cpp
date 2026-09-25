@@ -1099,8 +1099,11 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .basePipelineIndex = 0,
     };
     bool gpl_precompiled{};
+    // EDS2 ignores the static rasterizer-discard value, which is zero in the key.
+    // Such pipelines still need the fragment shader and output library parts.
+    const bool may_rasterize = key.state.extended_dynamic_state_2 || dynamic.rasterize_enable != 0;
     if (device.IsGraphicsPipelineLibrarySupported() && !key.state.xfb_enabled &&
-        dynamic.rasterize_enable != 0 && spv_modules[NUM_STAGES - 1]) {
+        may_rasterize && spv_modules[NUM_STAGES - 1]) {
         try {
             std::array<std::shared_ptr<vk::Pipeline>, 4> libraries;
             std::array<VkPipeline, 4> handles{};
@@ -1142,8 +1145,43 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                     cache_key.pipeline.unique_hashes = {};
                     std::ranges::copy(code_hashes,
                                       cache_key.pipeline.unique_hashes.begin());
-                    for (auto& attachment : cache_key.pipeline.state.attachments) {
+                    auto& state = cache_key.pipeline.state;
+                    // Shader libraries do not consume vertex-input or color-blend state.
+                    // The emitted code hashes retain any shader specialization caused by them.
+                    state.attribute_types = 0;
+                    state.alpha_test_ref = 0;
+                    state.point_size = 0;
+                    state.binding_divisors.fill(0);
+                    state.vertex_strides.fill(0);
+                    for (auto& attribute : state.attributes) {
+                        attribute.raw = 0;
+                    }
+                    for (auto& attachment : state.attachments) {
                         attachment.raw = 0;
+                    }
+                    if (index == 1) {
+                        // Pre-rasterization consumes viewport, rasterization and tessellation
+                        // state, plus render-pass compatibility, but not depth/stencil state.
+                        constexpr u32 depth_render_pass = (1U << 5) | (0x1FU << 6);
+                        constexpr u32 pre_raster = (1U << 11) | (7U << 12);
+                        state.raw2 &= depth_render_pass | pre_raster;
+                        state.dynamic_state.raw2 &= 1U << 28; // static front face
+                        state.depth_bounds_min = 0;
+                        state.depth_bounds_max = 0;
+                    } else {
+                        // The fragment library consumes multisample and depth/stencil state.
+                        // Its render pass still depends on formats, depth format and MSAA.
+                        constexpr u32 pre_raster_bits = (1U << 7) | (0xFFFU << 8) |
+                                                       (0xFU << 24);
+                        constexpr u32 fragment_bits = (1U << 5) | (0x1FU << 6) |
+                                                      (3U << 15);
+                        state.raw1 &= ~pre_raster_bits;
+                        state.raw2 &= fragment_bits;
+                        state.viewport_swizzles.fill(0);
+                        state.dynamic_state.raw1 = 0;
+                        state.dynamic_state.raw2 &= ~(1U << 28); // static front face
+                        state.line_stipple_factor = 0;
+                        state.line_stipple_pattern = 0;
                     }
                     cache_key.variant = static_cast<u32>(fragment_has_color0_output) |
                                         (Settings::values.sample_shading.GetValue() << 1);
@@ -1186,15 +1224,16 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
                     .renderPass = render_pass,
                     .subpass = 0,
                 };
-                const auto link_start = time_pipeline ? std::chrono::steady_clock::now()
-                                                      : std::chrono::steady_clock::time_point{};
+                const auto link_start = std::chrono::steady_clock::now();
                 pipeline = device.GetLogical().CreateGraphicsPipeline(link_ci, *pipeline_cache);
                 if (!pipeline) {
                     throw std::runtime_error("driver returned a null fast-linked pipeline");
                 }
+                const auto link_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - link_start).count();
+                library_cache.RecordLink(false, static_cast<u64>(link_ns));
                 if (time_pipeline) {
-                    const auto link_ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - link_start).count();
+                    const auto link_ms = static_cast<double>(link_ns) * 1.0e-6;
                     LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL fast link {:.2f} ms",
                              key.Hash(), link_ms);
                 }
@@ -1257,10 +1296,12 @@ void GraphicsPipeline::OptimizePipeline() {
         if (!optimized_pipeline) {
             throw std::runtime_error("driver returned a null optimized pipeline");
         }
+        const auto link_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        library_cache.RecordLink(true, static_cast<u64>(link_ns));
         optimized_ready.store(true, std::memory_order_release);
         if (PipelineTimingEnabled(key.Hash())) {
-            const auto elapsed = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - start).count();
+            const auto elapsed = static_cast<double>(link_ns) * 1.0e-6;
             LOG_INFO(Render_Vulkan, "Pipeline {:016x} GPL optimized link {:.2f} ms",
                      key.Hash(), elapsed);
         }

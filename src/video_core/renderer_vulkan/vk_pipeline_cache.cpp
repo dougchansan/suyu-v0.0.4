@@ -538,6 +538,22 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
 PipelineCache::~PipelineCache() {
     workers.WaitForRequests();
     optimization_workers.WaitForRequests();
+    if (device.IsGraphicsPipelineLibrarySupported()) {
+        const auto stats = graphics_library_cache.GetStats();
+        for (size_t part = 0; part < stats.hits.size(); ++part) {
+            LOG_INFO(Render_Vulkan, "GPL library part {}: {} hits, {} compile attempts, {} unique",
+                     part, stats.hits[part], stats.compile_attempts[part], stats.unique[part]);
+        }
+        for (size_t index = 0; index < stats.link_count.size(); ++index) {
+            const double mean_ms = stats.link_count[index] == 0
+                                       ? 0.0
+                                       : static_cast<double>(stats.link_total_ns[index]) * 1.0e-6 /
+                                             static_cast<double>(stats.link_count[index]);
+            LOG_INFO(Render_Vulkan, "GPL {} links: {} completed, mean {:.3f} ms, max {:.3f} ms",
+                     index == 0 ? "fast" : "optimized", stats.link_count[index], mean_ms,
+                     static_cast<double>(stats.link_max_ns[index]) * 1.0e-6);
+        }
+    }
     if (use_vulkan_pipeline_cache && !vulkan_pipeline_cache_filename.empty()) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
                                      CACHE_VERSION);
