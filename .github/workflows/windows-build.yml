@@ -1,0 +1,96 @@
+name: Windows x64 Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build suyu + Nextendo (Windows x64)
+    runs-on: windows-2025
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Install shader compiler (glslang)
+        shell: pwsh
+        run: |
+          if (!(Test-Path "C:\msys64\usr\bin\bash.exe")) {
+            Write-Error "MSYS2 was not found on the GitHub Windows runner."
+            exit 1
+          }
+          & "C:\msys64\usr\bin\bash.exe" -lc "pacman --noconfirm -Sy --needed mingw-w64-x86_64-glslang"
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\msys64\mingw64\bin"
+          if (!(Test-Path "C:\msys64\mingw64\bin\glslangValidator.exe")) {
+            Write-Error "glslangValidator.exe was not installed."
+            exit 1
+          }
+
+      - name: Configure (MSVC / Visual Studio 2026)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DENABLE_QT=ON -DYUZU_USE_BUNDLED_QT=ON -DYUZU_USE_BUNDLED_FFMPEG=ON -DYUZU_USE_BUNDLED_OPENSSL=ON -DYUZU_USE_BUNDLED_SDL3=ON -DYUZU_USE_BUNDLED_SIRIT=ON -DYUZU_CMD=ON -DYUZU_ROOM=ON -DYUZU_ROOM_STANDALONE=ON -DENABLE_UPDATE_CHECKER=OFF -DUSE_DISCORD_PRESENCE=OFF -DYUZU_TESTS=OFF -DBUILD_TESTING=OFF
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target suyu suyu-cmd --parallel 2
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          $suyu = Get-ChildItem -Path build -Filter suyu.exe -File -Recurse | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } | Select-Object -First 1
+          if (-not $suyu) { Write-Error "suyu.exe was not produced."; exit 1 }
+          Write-Host "suyu.exe: $($suyu.FullName)"
+          Get-ChildItem build -Filter suyu*.exe -File -Recurse | Select-Object FullName,Length
+
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+
+          $binRoot = Join-Path (Get-Location) "build/bin"
+          if (Test-Path $binRoot) {
+            Copy-Item "$binRoot/*" release/ -Recurse -Force
+          }
+
+          $suyu = Get-ChildItem -Path build -Filter suyu.exe -File -Recurse | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } | Select-Object -First 1
+          if (-not $suyu) { Write-Error "suyu.exe not found for packaging."; exit 1 }
+
+          if (-not (Test-Path "release/suyu.exe")) {
+            Copy-Item $suyu.FullName "release/suyu.exe" -Force
+          }
+
+          $cmd = Get-ChildItem -Path build -Filter suyu-cmd.exe -File -Recurse | Where-Object { $_.FullName -notmatch '\\CMakeFiles\\' } | Select-Object -First 1
+          if ($cmd -and -not (Test-Path "release/suyu-cmd.exe")) {
+            Copy-Item $cmd.FullName "release/suyu-cmd.exe" -Force
+          }
+
+          if (Test-Path LICENSE.txt) { Copy-Item LICENSE.txt release/ -Force }
+          if (Test-Path README.md) { Copy-Item README.md release/ -Force }
+
+          Compress-Archive -Path release/* -DestinationPath suyu-nextendo-windows-x64.zip -Force
+          Get-ChildItem release -Recurse | Select-Object FullName,Length
+          Get-Item suyu-nextendo-windows-x64.zip | Select-Object FullName,Length
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: suyu-nextendo-windows-x64
+          path: suyu-nextendo-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

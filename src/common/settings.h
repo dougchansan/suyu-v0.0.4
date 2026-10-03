@@ -887,6 +887,12 @@ struct Values {
                                            Category::Network};
     SwitchableSetting<bool> airplane_mode{linkage, false, "airplane_mode", Category::Network};
 
+    // Nextendo Network integration. Disabled by default; when enabled, Nintendo
+    // online-service DNS lookups are redirected to the configured Nextendo endpoint.
+    Setting<bool> enable_nextendo{linkage, false, "enable_nextendo", Category::Network};
+    Setting<std::string> nextendo_server_ip{linkage, "", "nextendo_server_ip", Category::Network};
+    Setting<std::string> nextendo_nat_ip{linkage, "", "nextendo_nat_ip", Category::Network};
+
     /// Hostname to answer with when a game asks for one of Nintendo's online
     /// services. Those are unreachable and are otherwise refused; pointing this
     /// at a replacement network - Nextendo and similar, which reimplement

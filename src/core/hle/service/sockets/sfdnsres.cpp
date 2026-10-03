@@ -115,6 +115,25 @@ static std::optional<std::string> ReplacementHostFor(const std::string& host) {
     if (!IsBlockedHost(host)) {
         return std::nullopt;
     }
+
+    // Nextendo takes precedence over the generic replacement-host setting.
+    // This is intentionally opt-in so a stock suyu configuration remains unchanged.
+    if (Settings::values.enable_nextendo.GetValue()) {
+        const std::string& nat_ip = Settings::values.nextendo_nat_ip.GetValue();
+        const std::string& server_ip = Settings::values.nextendo_server_ip.GetValue();
+
+        if (host.starts_with("nncs2-") && host.ends_with(".n.n.srv.nintendo.net") &&
+            !nat_ip.empty()) {
+            LOG_INFO(Network, "[Nextendo] Redirecting NAT host {} -> {}", host, nat_ip);
+            return nat_ip;
+        }
+
+        if (!server_ip.empty()) {
+            LOG_INFO(Network, "[Nextendo] Redirecting Nintendo host {} -> {}", host, server_ip);
+            return server_ip;
+        }
+    }
+
     const auto& replacement = Settings::values.network_replacement_host.GetValue();
     if (replacement.empty()) {
         return std::nullopt;
