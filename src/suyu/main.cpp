@@ -4248,6 +4248,10 @@ void GMainWindow::HideFullscreen() {
             render_window->show();
         }
     }
+    // Leaving fullscreen means the UI is visible.
+    // Keep the mouse cursor visible while using the UI.
+    ShowMouseCursor();
+    mouse_hide_timer.stop();
 }
 
 void GMainWindow::ToggleWindowMode() {
@@ -8617,9 +8621,15 @@ void GMainWindow::HideMouseCursor() {
 }
 
 void GMainWindow::ShowMouseCursor() {
-    render_window->unsetCursor();
-    if (emu_thread != nullptr && UISettings::values.hide_mouse) {
+    render_window->setCursor(QCursor(Qt::ArrowCursor));
+
+    // Only auto-hide the cursor while actually in fullscreen gameplay.
+    // In windowed/UI mode (for example after F11), keep it visible.
+    if (emu_thread != nullptr && UISettings::values.hide_mouse &&
+        ui->action_Fullscreen->isChecked()) {
         mouse_hide_timer.start();
+    } else {
+        mouse_hide_timer.stop();
     }
 }
 

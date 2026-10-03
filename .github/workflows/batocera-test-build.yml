@@ -1,0 +1,88 @@
+name: Batocera Suyu test build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout patched Suyu
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ninja-build \
+            glslang-tools \
+            qt6-base-dev \
+            qt6-base-private-dev \
+            qt6-multimedia-dev \
+            qt6-tools-dev \
+            qt6-svg-dev \
+            qt6-webengine-dev \
+            qt6-charts-dev \
+            libssl-dev \
+            libusb-1.0-0-dev \
+            libpulse-dev \
+            libvulkan-dev \
+            gamemode-dev \
+            libx11-dev \
+            libxext-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxfixes-dev \
+            libxss-dev \
+            libxkbcommon-dev \
+            libxtst-dev \
+            libwayland-dev \
+            libwayland-egl1 \
+            wayland-protocols \
+            libdecor-0-dev \
+            libegl-dev \
+            libdrm-dev \
+            libgbm-dev \
+            libavcodec-dev \
+            libavfilter-dev \
+            libavutil-dev \
+            libswscale-dev \
+            libboost-all-dev
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_QT=ON \
+            -DYUZU_USE_BUNDLED_QT=OFF \
+            -DOPENSSL_ROOT_DIR=/usr \
+            -GNinja
+
+      - name: Build Suyu
+        run: |
+          cmake --build build --target suyu suyu-cmd -j4
+
+      - name: Prepare test package
+        run: |
+          mkdir -p artifact
+          cp build/bin/suyu artifact/
+          cp build/bin/suyu-cmd artifact/
+          chmod +x artifact/suyu artifact/suyu-cmd
+
+          echo "=== Built files ==="
+          ls -lh artifact/
+
+          echo "=== SHA256 ==="
+          sha256sum artifact/suyu artifact/suyu-cmd > artifact/SHA256SUMS.txt
+          cat artifact/SHA256SUMS.txt
+
+      - name: Upload Batocera test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: suyu-batocera-romfs-gui-fix
+          path: artifact/
+          if-no-files-found: error

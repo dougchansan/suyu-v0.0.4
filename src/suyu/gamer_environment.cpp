@@ -1420,7 +1420,6 @@ QWidget* GamerEnvironment::BuildSocialPage() {
     social_browser_->setHtml(QStringLiteral(
         "<div class='bubble-header'>Loading r/suyu posts...</div>"));
     redditLayout->addWidget(social_browser_);
-    connect(social_refresh_btn_, &QPushButton::clicked, this, &GamerEnvironment::LoadRedditFeed);
 
     vl->addWidget(redditTab, 1);
 

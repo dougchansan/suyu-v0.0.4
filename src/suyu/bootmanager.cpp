@@ -283,6 +283,7 @@ public:
     explicit RenderWidget(GRenderWindow* parent) : QWidget(parent), render_window(parent) {
         setAttribute(Qt::WA_NativeWindow);
         setAttribute(Qt::WA_PaintOnScreen);
+        setCursor(QCursor(Qt::ArrowCursor));
         if (QtCommon::GetWindowSystemType() == Core::Frontend::WindowSystemType::Wayland) {
             setAttribute(Qt::WA_DontCreateNativeAncestors);
         }
