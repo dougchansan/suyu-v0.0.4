@@ -127,9 +127,18 @@ u64 g_presented_frame = 0;
 bool g_have_presented = false;
 unsigned g_perf_frontend_frames = 0;
 unsigned g_perf_unique_frames = 0;
+
+unsigned g_output_scale = 1;
+bool g_geometry_dirty = false;
+
 // False: suyu drives a host audio device directly (default, sounds correct).
 // True: samples are handed to the frontend via retro_audio_sample_batch.
 bool g_use_frontend_audio = false;
+// Set once RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK registration succeeds (see
+// retro_load_game()). When true, retro_run() leaves audio delivery to
+// FrontendAudioCallback() instead of doing it inline, since both draining the
+// same queue would just race pointlessly.
+bool g_audio_callback_registered = false;
 
 retro_environment_t g_environ_cb;
 retro_video_refresh_t g_video_cb;
@@ -231,6 +240,118 @@ void ShowPerfMessage(std::string text) {
         g_environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
     }
 }
+// Points a single suyu data directory at a subfolder of a frontend-provided
+// base directory, creating it first since Common::FS::SetSuyuPath silently
+// refuses to point at a path that doesn't exist yet (or isn't a directory).
+bool RedirectSuyuDir(Common::FS::SuyuPath suyu_path, const std::filesystem::path& base,
+                      const char* sub_dir) {
+    if (base.empty()) {
+        return false;
+    }
+    const auto target = base / sub_dir;
+    std::error_code ec;
+    std::filesystem::create_directories(target, ec);
+    if (ec) {
+        LOG_ERROR(Frontend, "libretro: failed to create {} ({})", target.string(), ec.message());
+        return false;
+    }
+    Common::FS::SetSuyuPath(suyu_path, target);
+    return true;
+}
+
+// Redirects suyu's persistent data out of %APPDATA%\suyu (or <retroarch>\user
+// in portable mode) and into the directories RetroArch itself hands the core:
+//   - RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY for config/keys/cache/logs
+//   - RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY for NAND/SDMC/saves/screenshots,
+//     so RetroArch's own save handling (per-core folders, backups, cloud
+//     sync, etc.) covers suyu's data the same way it covers any other core
+// Each is placed directly in the frontend-provided directory (e.g.
+// <system_directory>\config, <save_directory>\nand) with no extra "suyu"
+// subfolder, so per-core RetroArch overrides that already point
+// system_directory/save_directory somewhere suyu-specific (as set up in a
+// core override .cfg) land exactly where they say, with nothing extra
+// appended. If you share that base directory with another emulator, point
+// the override somewhere suyu-specific instead of relying on this code to
+// namespace it for you.
+// Controlled by the "suyu_use_frontend_dirs" core option, enabled by default.
+// Must run before anything (including keys import, below) touches
+// Common::FS::GetSuyuPath, or those uses will already have grabbed the old,
+// non-redirected paths.
+void RedirectSuyuPathsToFrontend() {
+    if (!g_environ_cb) {
+        return;
+    }
+
+    struct retro_variable var {
+        "suyu_use_frontend_dirs", nullptr
+    };
+    // Frontends make the declared default available as soon as
+    // RETRO_ENVIRONMENT_SET_VARIABLES has run, i.e. before retro_init() is
+    // even called, so this reads correctly on a completely fresh install too.
+    bool use_frontend_dirs = true;
+    if (g_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        use_frontend_dirs = std::strcmp(var.value, "Disabled") != 0;
+    }
+    if (!use_frontend_dirs) {
+        LOG_INFO(Frontend, "libretro: suyu_use_frontend_dirs disabled, keeping default data location");
+        return;
+    }
+
+    const char* system_dir = nullptr;
+    const char* save_dir = nullptr;
+    g_environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir);
+    g_environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &save_dir);
+
+    const std::filesystem::path system_base =
+        (system_dir && *system_dir) ? std::filesystem::path(system_dir) : std::filesystem::path{};
+    // Some setups (e.g. RetroArch's "Save files in content directory") can
+    // report an empty save directory even though a system directory exists.
+    // Fall back to the system directory as the root for save-type data too,
+    // rather than silently reverting to %APPDATA% for just those folders.
+    const std::filesystem::path save_base =
+        (save_dir && *save_dir) ? std::filesystem::path(save_dir) : system_base;
+
+    if (system_base.empty()) {
+        LOG_WARNING(Frontend, "libretro: frontend gave no system directory; "
+                              "keeping suyu's default (%APPDATA%/portable) data location");
+        return;
+    }
+
+    using Common::FS::SuyuPath;
+
+    // Save-type data: goes under RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY.
+    RedirectSuyuDir(SuyuPath::NANDDir, save_base, "nand");
+    RedirectSuyuDir(SuyuPath::SaveDir, save_base, "nand"); // suyu aliases SaveDir to the NAND dir
+    RedirectSuyuDir(SuyuPath::SDMCDir, save_base, "sdmc");
+    RedirectSuyuDir(SuyuPath::ScreenshotsDir, save_base, "screenshots");
+    RedirectSuyuDir(SuyuPath::TASDir, save_base, "tas");
+    RedirectSuyuDir(SuyuPath::PlayTimeDir, save_base, "play_time");
+    RedirectSuyuDir(SuyuPath::AmiiboDir, save_base, "amiibo");
+    RedirectSuyuDir(SuyuPath::LoadDir, save_base, "load");
+    RedirectSuyuDir(SuyuPath::DumpDir, save_base, "dump");
+
+    // Fixed/system-type data: goes under RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY.
+    RedirectSuyuDir(SuyuPath::ConfigDir, system_base, "config");
+    RedirectSuyuDir(SuyuPath::KeysDir, system_base, "keys");
+    RedirectSuyuDir(SuyuPath::CacheDir, system_base, "cache");
+    RedirectSuyuDir(SuyuPath::ShaderDir, system_base, "cache/shader");
+    RedirectSuyuDir(SuyuPath::LogDir, system_base, "log");
+    RedirectSuyuDir(SuyuPath::CrashDumpsDir, system_base, "crash_dumps");
+
+    // Root path that a couple of rarely-used secondary subsystems read
+    // directly (a nested-libretro-core loader's default firmware directory,
+    // and the hactool integration helper's temp-extraction and tool-search
+    // paths). Pointed at the system directory itself, with no subfolder, so
+    // nothing is ever written under %APPDATA% even for these.
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(system_base, ec);
+        Common::FS::SetSuyuPath(SuyuPath::EdenDir, system_base);
+    }
+
+    LOG_INFO(Frontend, "libretro: redirected suyu data - system={} save={}", system_base.string(),
+              save_base.string());
+}
 
 } // namespace
 
@@ -254,6 +375,13 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
         {"suyu_cpu_accuracy", "CPU Accuracy (reload content); Auto|Accurate|Unsafe"},
         {"suyu_use_docked", "Docked Mode (reload content); Yes|No"},
         {"suyu_fastmem", "Fastmem (reload content); Enabled|Disabled"},
+        // Redirects suyu's data (NAND/SDMC/saves/config/keys/cache/logs) into
+        // RetroArch's own system/save directories instead of suyu's normal
+        // %APPDATA%\suyu (or <retroarch>\user in portable mode) location.
+        // Default is Enabled so the core behaves like other libretro cores
+        // out of the box; switch to Disabled to keep using a standalone
+        // suyu install's existing data instead.
+        {"suyu_use_frontend_dirs", "Use RetroArch System/Save Directories; Enabled|Disabled"},
         {"suyu_audio_output", "Audio Output (reload content); Host (direct)|Frontend (libretro)"},
         // suyu's own online play. RetroArch's netplay can't drive this core
         // (see retro_serialize_size), but suyu's room system tunnels the
@@ -317,6 +445,11 @@ RETRO_API void retro_init() {
     Common::FS::SetAppDirectory(user_directory.string());
     Common::FS::CreateSuyuPaths();
 #endif
+    // Must happen before any Common::FS::GetSuyuPath() call (including the
+    // key-import block just below), or those calls will already have latched
+    // onto the old %APPDATA%/portable paths.
+    RedirectSuyuPathsToFrontend();
+  
     Common::Log::Initialize();
     Common::Log::Start();
 
@@ -455,6 +588,81 @@ constexpr RetroToVirtual kButtonMap[] = {
 bool g_prev_buttons[20] = {};
 } // namespace
 
+namespace {
+
+// Drains whatever the emulated audio renderer produced since the last call
+// and hands it to the frontend. upload_batch takes frames (L+R pairs), not
+// individual samples. Feed the frontend a steady ~1 frame of audio per call
+// rather than whatever has piled up: RetroArch resamples against its own
+// clock and expects roughly sample_rate/fps frames each call, and handing it
+// a quarter second in one lump and nothing for the next 15 calls is what made
+// the output screech. Anything beyond a small backlog is dropped so latency
+// can't creep up instead.
+//
+// Called either from retro_run() (frontends too old to support
+// RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK) or from FrontendAudioCallback()
+// below, never both - see g_audio_callback_registered.
+void DeliverPendingAudio() {
+    if (!g_use_frontend_audio || !g_audio_batch_cb || !g_game_loaded) {
+        return;
+    }
+
+    constexpr size_t kFramesPerCall = 48000 / 60; // stereo frames
+    constexpr size_t kMaxBacklogFrames = kFramesPerCall * 6;
+
+    static std::vector<s16> pending; // interleaved L,R awaiting delivery
+    std::vector<s16> drained;
+    AudioCore::Sink::LibretroSampleQueue::Instance().Drain(drained);
+    if (!drained.empty()) {
+        pending.insert(pending.end(), drained.begin(), drained.end());
+    }
+
+    // Trim from the front if we've fallen behind; stale audio is worse than a
+    // short gap.
+    if (pending.size() > kMaxBacklogFrames * 2) {
+        const size_t excess = pending.size() - kMaxBacklogFrames * 2;
+        pending.erase(pending.begin(), pending.begin() + static_cast<ptrdiff_t>(excess));
+    }
+
+    const size_t frames = std::min(kFramesPerCall, pending.size() / 2);
+    if (frames > 0) {
+        g_audio_batch_cb(pending.data(), frames);
+        pending.erase(pending.begin(), pending.begin() + static_cast<ptrdiff_t>(frames * 2));
+    }
+}
+
+// Called by the frontend's own audio thread once RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK
+// is registered, independently of whether retro_run() is being called at all.
+void RETRO_CALLCONV FrontendAudioCallback() {
+    DeliverPendingAudio();
+}
+
+// The actual reason to register SET_AUDIO_CALLBACK at all: its set_state
+// half is the one libretro hook that still fires while the frontend has
+// stopped calling retro_run() entirely (RetroArch's menu open, content
+// paused, rewind, etc.). Without this, suyu's own CPU/GPU threads - kicked
+// off once by g_system->Run() in retro_load_game() and never revisited -
+// keep running regardless of whether the frontend is still ticking us, which
+// is why the game previously kept advancing behind the RetroArch menu.
+// enabled=false means "the frontend has gone quiet"; enabled=true means
+// "resume normal operation".
+void RETRO_CALLCONV FrontendAudioSetState(bool enabled) {
+    if (!g_system || !g_game_loaded) {
+        return;
+    }
+    if (enabled) {
+        if (g_system->IsPaused()) {
+            g_system->Run();
+        }
+    } else {
+        if (!g_system->IsPaused()) {
+            g_system->Pause();
+        }
+    }
+}
+
+} // namespace
+
 RETRO_API void retro_run() {
     // This frontend is the sole periodic consumer of the destructive stats read.
     // Sample guest rendering/timing, independently of retro_run's frontend FPS.
@@ -527,6 +735,15 @@ RETRO_API void retro_run() {
             g_perf_frontend_frames = 0;
             g_perf_unique_frames = 0;
         }
+    if (g_geometry_dirty && g_environ_cb) {
+        retro_game_geometry geom{};
+        geom.base_width = kFrameWidth * g_output_scale;
+        geom.base_height = kFrameHeight * g_output_scale;
+        geom.max_width = kFrameWidth * 4;
+        geom.max_height = kFrameHeight * 4;
+        geom.aspect_ratio = (float)kFrameWidth / (float)kFrameHeight;
+        g_environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &geom);
+        g_geometry_dirty = false;
     }
     if (g_input_poll_cb) {
         g_input_poll_cb();
@@ -564,37 +781,12 @@ RETRO_API void retro_run() {
         fflush(stderr);
     }
 
-    // Hand over whatever the emulated audio renderer produced since the last
-    // frame. upload_batch takes frames (L+R pairs), not individual samples.
-    // Feed the frontend a steady ~1 frame of audio per call rather than
-    // whatever has piled up. RetroArch resamples against its own clock and
-    // expects roughly sample_rate/fps frames each retro_run; handing it a
-    // quarter second in one lump and nothing for the next 15 calls is what
-    // made the output screech. Anything beyond a small backlog is dropped so
-    // latency can't creep up instead.
-    if (g_use_frontend_audio && g_audio_batch_cb && g_game_loaded) {
-        constexpr size_t kFramesPerCall = 48000 / 60;   // stereo frames
-        constexpr size_t kMaxBacklogFrames = kFramesPerCall * 6;
-
-        static std::vector<s16> pending;   // interleaved L,R awaiting delivery
-        std::vector<s16> drained;
-        AudioCore::Sink::LibretroSampleQueue::Instance().Drain(drained);
-        if (!drained.empty()) {
-            pending.insert(pending.end(), drained.begin(), drained.end());
-        }
-
-        // Trim from the front if we've fallen behind; stale audio is worse
-        // than a short gap.
-        if (pending.size() > kMaxBacklogFrames * 2) {
-            const size_t excess = pending.size() - kMaxBacklogFrames * 2;
-            pending.erase(pending.begin(), pending.begin() + static_cast<ptrdiff_t>(excess));
-        }
-
-        const size_t frames = std::min(kFramesPerCall, pending.size() / 2);
-        if (frames > 0) {
-            g_audio_batch_cb(pending.data(), frames);
-            pending.erase(pending.begin(), pending.begin() + static_cast<ptrdiff_t>(frames * 2));
-        }
+    // Only handle audio here ourselves if no async audio callback took over
+    // in retro_load_game() - otherwise FrontendAudioCallback() is already
+    // draining the same queue from the frontend's audio thread, and doing it
+    // in both places would just race for no benefit.
+    if (!g_audio_callback_registered) {
+        DeliverPendingAudio();
     }
 
     if (g_video_cb && g_system && g_game_loaded) {
@@ -792,9 +984,17 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         if (g_environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
             const std::string v(var.value);
             auto res = Settings::ResolutionSetup::Res1X;
-            if (v == "2x") res = Settings::ResolutionSetup::Res2X;
-            else if (v == "3x") res = Settings::ResolutionSetup::Res3X;
-            else if (v == "4x") res = Settings::ResolutionSetup::Res4X;
+            if (v == "2x") {
+                res = Settings::ResolutionSetup::Res2X;
+                g_output_scale = 2;
+            } else if (v == "3x") {
+                res = Settings::ResolutionSetup::Res3X;
+                g_output_scale = 3;
+            }
+            else if (v == "4x") {
+                res = Settings::ResolutionSetup::Res4X;
+                g_output_scale = 4;
+            }
             Settings::values.resolution_setup.SetValue(res);
         }
         var.key = "suyu_scaling_filter";
@@ -836,6 +1036,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
             Settings::values.cpuopt_fastmem_exclusives.SetValue(enabled);
         }
         g_system->ApplySettings();
+
+        g_emu_window->UpdateCurrentFramebufferLayout(kFrameWidth * g_output_scale, kFrameHeight * g_output_scale);
 
         // Join a suyu room if the user configured one. Done here rather than
         // in retro_init so the options the frontend collected are already
@@ -969,6 +1171,24 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     g_perf_start = g_perf_last_sample = std::chrono::steady_clock::now();
     g_system->Run();
     g_game_loaded = true;
+
+    // Register for the frontend's audio-pause notification (see
+    // FrontendAudioSetState's comment) so opening the RetroArch menu, or
+    // pausing content, actually pauses suyu's own CPU/GPU threads instead of
+    // letting them run on unattended in the background.
+    struct retro_audio_callback audio_cb {};
+    audio_cb.callback = FrontendAudioCallback;
+    audio_cb.set_state = FrontendAudioSetState;
+    g_audio_callback_registered = g_environ_cb(RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK, &audio_cb);
+    if (g_audio_callback_registered) {
+        LOG_INFO(Frontend, "libretro core: registered async audio callback - "
+                            "frontend pause/menu will now pause emulation");
+    } else {
+        LOG_WARNING(Frontend, "libretro core: frontend doesn't support "
+                               "RETRO_ENVIRONMENT_SET_AUDIO_CALLBACK - opening the menu or "
+                               "pausing content won't pause suyu's own emulation");
+    }
+
     LOG_INFO(Frontend, "libretro core: game loaded and running");
     return true;
 }
@@ -982,6 +1202,8 @@ RETRO_API void retro_unload_game() {
     g_sample_perf = false;
     g_have_presented = false;
     if (g_system && g_game_loaded) {
+        g_output_scale = 1;
+        g_geometry_dirty = false;
         g_system->ShutdownMainProcess();
     }
     if (g_emu_window) {

@@ -127,6 +127,7 @@ public:
      * Read from the current settings to determine which layout to use.
      */
     void UpdateCurrentFramebufferLayout(u32 width, u32 height);
+    
 
 protected:
     explicit EmuWindow();
